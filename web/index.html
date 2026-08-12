@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pre-scrore — Premier League predictions with a public record</title>
+<meta name="description" content="Poisson-model predictions for Premier League matches, published before kickoff and graded against the result. Losses shown as openly as wins.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚽</text></svg>">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">⚽</span>
+      <div>
+        <h1>pre-scrore</h1>
+        <p class="tagline" id="league-name">Premier League predictions</p>
+      </div>
+    </div>
+    <p class="disclaimer" id="disclaimer"></p>
+  </div>
+</header>
+
+<main class="wrap" id="main">
+
+  <section class="panel" id="record-panel" aria-labelledby="record-heading">
+    <h2 id="record-heading">Track record</h2>
+    <div id="record-body"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="upcoming-heading">
+    <h2 id="upcoming-heading">Upcoming predictions</h2>
+    <p class="panel-note">
+      Every prediction below was written to the database before kickoff and
+      cannot be edited afterwards.
+    </p>
+    <div id="upcoming-body"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="results-heading">
+    <h2 id="results-heading">Results</h2>
+    <p class="panel-note">
+      Graded predictions, newest first. Misses are shown alongside hits — a
+      record that hides its losses is worth nothing.
+    </p>
+    <div id="results-body"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="method-heading">
+    <h2 id="method-heading">How this works</h2>
+    <div class="method">
+      <p>
+        Each team carries an <strong>attack</strong> and a <strong>defence</strong>
+        rating, fit from historical goals scored and conceded with home and away
+        split out. Those ratings produce an expected goal count for each side,
+        which becomes a probability for every scoreline, which adds up to the
+        home / draw / away numbers shown here.
+      </p>
+      <p>
+        Recent matches count for more than old ones — a result from two seasons
+        ago carries a fraction of the weight of one from last month. A
+        Dixon-Coles correction adjusts the low-scoring scorelines, which
+        independent Poisson models are known to get wrong.
+      </p>
+      <p>
+        <strong>The model rarely predicts a draw.</strong> Draws happen in about
+        a quarter of matches but are seldom the single most likely outcome, so
+        the pick is usually home or away. Read the probabilities, not just the
+        pick.
+      </p>
+      <p class="muted" id="model-meta"></p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>
+      Statistical analysis for informational purposes. Not betting advice, and
+      not a recommendation to wager.
+    </p>
+    <p class="muted" id="generated-at"></p>
+  </div>
+</footer>
+
+<!-- Loads when opened directly from disk; ignored when absent. -->
+<script src="data.js" onerror="this.dataset.failed='1'"></script>
+<script src="app.js"></script>
+</body>
+</html>

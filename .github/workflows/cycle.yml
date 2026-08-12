@@ -1,0 +1,96 @@
+# pre-scrore scheduled cycle.
+# ingest -> pull -> run (fixtures, publish, grade, export) -> push -> deploy
+#
+# `pull` is not optional. A runner starts with no database, so without it
+# `publish` would re-predict fixtures that are already public and `grade`
+# would score those local rows rather than the ones actually published,
+# attaching metrics to remote predictions whose probabilities nobody saw.
+#
+# A prediction cannot be written after kickoff, by design. A missed run is
+# therefore a permanent hole in the record, not a delay -- which is why this
+# runs six times a day against a seven-day publish horizon, giving each
+# fixture roughly 28 chances to be caught.
+
+name: cycle
+
+on:
+  schedule:
+    # Every 6 hours (UTC). GitHub queues scheduled jobs and can run them late
+    # under load; the wide horizon absorbs that.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+# Never let two cycles overlap. They would both try to publish the same
+# fixtures, and the remote unique constraint would turn that into a failure
+# rather than a no-op.
+concurrency:
+  group: prescore-cycle
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The project has no dependencies, so there is nothing to install.
+      # Only the downloaded season CSVs are worth keeping between runs.
+      - name: Cache football-data CSVs
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: football-data-${{ github.run_id }}
+          restore-keys: football-data-
+
+      # Fail here with a clear message rather than three steps later with a
+      # confusing HTTP 401. `env` prints key lengths, never key values.
+      - name: Check credentials are present
+        run: |
+          python -m prescore env
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_SERVICE_ROLE_KEY is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Seed historical results
+        run: python -m prescore ingest
+
+      - name: Pull the published record from Supabase
+        run: python -m prescore pull
+
+      - name: Sync fixtures, publish, grade, export
+        run: python -m prescore run --horizon-days 7
+
+      - name: Push to Supabase
+        run: python -m prescore push
+
+      - name: Show the record
+        run: python -m prescore status
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: cycle
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

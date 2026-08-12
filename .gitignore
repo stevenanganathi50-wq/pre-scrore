@@ -1,0 +1,26 @@
+# Local database and downloaded data
+data/prescore.db
+data/raw/
+data/reports/
+data/logs/
+
+# Secrets
+.env
+.env.local
+
+# Supabase CLI local state (never commit: may contain project refs and keys)
+supabase/.temp/
+supabase/.branches/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
