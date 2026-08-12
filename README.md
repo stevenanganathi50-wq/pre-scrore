@@ -63,6 +63,7 @@ python -m http.server 8765 --directory web
 | `export` | Write `web/data.json` for the frontend |
 | `run` | The full cycle: fixtures → publish → grade → export |
 | `env` | Show which Supabase settings are loaded (never prints a key) |
+| `pull` | Hydrate the local database from Supabase (required on any runner without durable storage) |
 | `push` | Push the local record to Supabase |
 | `verify` | Audit the live database's guarantees with real keys |
 
@@ -510,27 +511,59 @@ Two settings are deliberate:
   a run is missed; shorter means fresher ratings behind each prediction. A
   week gives roughly 28 attempts per fixture at modest staleness.
 
-### The reliability limit you should know about
+The task runs **only while you are logged on** — registering a "run whether
+logged on or not" task would mean storing a Windows password. Treat it as a
+backup to the GitHub Actions schedule below, not the primary runner: a laptop
+closed over a weekend misses a matchweek, and those predictions can never be
+backfilled.
 
-The task runs **only while you are logged on**. Registering a "run whether
-logged on or not" task would mean storing a Windows password, which is not a
-reasonable trade for this.
+### GitHub Actions (the always-on runner)
 
-That is fine for now and not fine forever: a laptop closed over a weekend
-misses a matchweek, and those predictions can never be backfilled. The natural
-fix is to move the cycle to something always-on — a GitHub Actions schedule
-with the Supabase keys as encrypted secrets would do it for free — and that is
-the single most valuable piece of remaining infrastructure.
+`.github/workflows/cycle.yml` runs the same cycle every 6 hours on GitHub's
+infrastructure and deploys the site to Pages. Setup:
+
+1. Create a repository and push.
+2. Add three repository secrets under **Settings → Secrets and variables →
+   Actions**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+3. Under **Settings → Pages**, set the source to **GitHub Actions**.
+4. Trigger it once by hand from the Actions tab to confirm.
+
+Tests live in a separate workflow on purpose. If a test regression blocked the
+cycle, a broken build would become *missing predictions*, and a missing
+prediction is permanent — better to have red tests and a record that keeps
+publishing.
+
+Two things to know about GitHub's scheduler: cron times are UTC and jobs can
+run late under load (the seven-day publish horizon absorbs that), and
+**scheduled workflows are disabled automatically after 60 days without repo
+activity**, which would silently stop the record.
+
+### Why the cycle starts with `pull`
+
+A runner has no durable storage, so every run begins with an empty database.
+Without `pull`, `publish` would not know a fixture was already public and
+would predict it again with a fresh timestamp and different probabilities;
+`grade` would then score *those* rows and `push` would attach the resulting
+metrics to the remote prediction, whose probabilities nobody ever saw. Row
+counts would still reconcile, so nothing would flag it.
+
+`pull` hydrates the local database from Supabase first, so the runner works
+from the published record rather than a reconstruction of it. Verified by
+wiping the local database, rebuilding from nothing and comparing: picks and
+timestamps byte-identical, probabilities within **5e-16** (Postgres emits
+`double precision` at 15 significant digits, so exact float round-trip is not
+available and does not matter).
 
 ---
 
 ## What is not built yet
 
-- **The frontend still reads a static `data.json`.** Pointing it at PostgREST
-  with the anon key would make it live, and needs no new dependency.
-- **Hosting.** `web/` is a static folder; it will deploy to GitHub Pages or
-  Netlify as-is.
-- **An always-on runner** — see the reliability limit above.
+- **The frontend still reads a static `data.json`.** The Actions workflow
+  regenerates and deploys it every 6 hours, so it stays fresh — but pointing
+  the page at PostgREST with the anon key would make it genuinely live, and
+  needs no new dependency.
+- **Nothing is pushed to GitHub yet.** The repository is initialised and
+  committed locally; the remote, the secrets and Pages are still to be set up.
 
 The 2026/27 season has not kicked off yet, so **the live record is empty**. The
 site says so plainly and shows the backtest in its place, clearly labelled as
