@@ -85,6 +85,11 @@ class PoissonDixonColes:
     newcomer_defence: float = config.NEWCOMER_DEFENCE
     xg_weight: float = config.XG_WEIGHT
     sot_conversion: float | None = None
+    # Net effect of the injury differential (away count minus home count) on
+    # the home side's linear predictor, and its mirror image on the away
+    # side. Zero unless `fit()` was called with `fit_injury_weight=True` --
+    # see the module docstring note on why that defaults off.
+    injury_weight: float = 0.0
     version: str = field(default=config.MODEL_VERSION)
 
     # -- prediction -------------------------------------------------------
@@ -92,28 +97,50 @@ class PoissonDixonColes:
     def knows(self, team: str) -> bool:
         return team in self.attack
 
-    def expected_goals(self, home: str, away: str) -> tuple[float, float]:
+    def expected_goals(
+        self,
+        home: str,
+        away: str,
+        home_injuries: float = 0.0,
+        away_injuries: float = 0.0,
+    ) -> tuple[float, float]:
         """Expected goals for each side.
 
         A team with no history falls back to the newcomer prior rather than to
         league average: a side with no top-flight record is almost always newly
         promoted, and promoted teams are measurably worse than average.
         Callers that want to flag the uncertainty should check `knows()`.
+
+        `*_injuries` is a count of players listed injured for this fixture.
+        Only the *differential* affects the linear predictor -- a team down
+        two players against an opponent also down two players cancels out,
+        since what matters is relative disadvantage, not the raw count. The
+        coefficient is zero (a no-op) unless the model was fit with
+        `fit_injury_weight=True`.
         """
         atk_h = self.attack.get(home, self.newcomer_attack)
         atk_a = self.attack.get(away, self.newcomer_attack)
         def_h = self.defence.get(home, self.newcomer_defence)
         def_a = self.defence.get(away, self.newcomer_defence)
+        injury_term = self.injury_weight * (away_injuries - home_injuries)
 
-        log_home = min(self.base + atk_h - def_a + self.home_advantage, _MAX_LOG_GOALS)
-        log_away = min(self.base + atk_a - def_h, _MAX_LOG_GOALS)
+        log_home = min(
+            self.base + atk_h - def_a + self.home_advantage + injury_term,
+            _MAX_LOG_GOALS,
+        )
+        log_away = min(self.base + atk_a - def_h - injury_term, _MAX_LOG_GOALS)
         return math.exp(log_home), math.exp(log_away)
 
     def score_matrix(
-        self, home: str, away: str, max_goals: int = config.MAX_GOALS
+        self,
+        home: str,
+        away: str,
+        max_goals: int = config.MAX_GOALS,
+        home_injuries: float = 0.0,
+        away_injuries: float = 0.0,
     ) -> list[list[float]]:
         """Joint probability of every scoreline up to `max_goals` each."""
-        lam, mu = self.expected_goals(home, away)
+        lam, mu = self.expected_goals(home, away, home_injuries, away_injuries)
         home_pmf = _poisson_pmf(lam, max_goals)
         away_pmf = _poisson_pmf(mu, max_goals)
 
@@ -127,8 +154,14 @@ class PoissonDixonColes:
         total = sum(sum(row) for row in matrix)
         return [[cell / total for cell in row] for row in matrix]
 
-    def predict(self, home: str, away: str) -> Outcome:
-        matrix = self.score_matrix(home, away)
+    def predict(
+        self,
+        home: str,
+        away: str,
+        home_injuries: float = 0.0,
+        away_injuries: float = 0.0,
+    ) -> Outcome:
+        matrix = self.score_matrix(home, away, home_injuries=home_injuries, away_injuries=away_injuries)
         p_home = p_draw = p_away = 0.0
         for x, row in enumerate(matrix):
             for y, cell in enumerate(row):
@@ -138,7 +171,7 @@ class PoissonDixonColes:
                     p_draw += cell
                 else:
                     p_away += cell
-        lam, mu = self.expected_goals(home, away)
+        lam, mu = self.expected_goals(home, away, home_injuries, away_injuries)
         return Outcome(p_home, p_draw, p_away, lam, mu)
 
     # -- reporting --------------------------------------------------------
@@ -154,6 +187,7 @@ class PoissonDixonColes:
             "version": self.version,
             "base": self.base,
             "home_advantage": self.home_advantage,
+            "injury_weight": self.injury_weight,
             "rho": self.rho,
             "half_life_days": self.half_life_days,
             "ridge": self.ridge,
@@ -184,6 +218,10 @@ class _Design:
     away_target: list[float]
     weight: list[float]
     n_teams: int
+    # Injury counts default to 0.0 for any match whose source object doesn't
+    # carry them, so callers who never touch injuries see no behaviour change.
+    home_injuries: list[float] = field(default_factory=list)
+    away_injuries: list[float] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.home_idx)
@@ -283,6 +321,12 @@ def _tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
     return 1.0
 
 
+def _injury_term(d: _Design, k: int, injury_weight: float) -> float:
+    if not injury_weight or not d.home_injuries:
+        return 0.0
+    return injury_weight * (d.away_injuries[k] - d.home_injuries[k])
+
+
 def _log_likelihood(
     d: _Design,
     atk: list[float],
@@ -292,13 +336,15 @@ def _log_likelihood(
     ridge: float,
     prior_atk: list[float] | None = None,
     prior_dfn: list[float] | None = None,
+    injury_weight: float = 0.0,
 ) -> float:
     total = 0.0
     for k in range(len(d)):
         h = d.home_idx[k]
         a = d.away_idx[k]
-        eta_h = min(base + atk[h] - dfn[a] + hfa, _MAX_LOG_GOALS)
-        eta_a = min(base + atk[a] - dfn[h], _MAX_LOG_GOALS)
+        inj = _injury_term(d, k, injury_weight)
+        eta_h = min(base + atk[h] - dfn[a] + hfa + inj, _MAX_LOG_GOALS)
+        eta_a = min(base + atk[a] - dfn[h] - inj, _MAX_LOG_GOALS)
         total += d.weight[k] * (
             d.home_target[k] * eta_h - math.exp(eta_h)
             + d.away_target[k] * eta_a - math.exp(eta_a)
@@ -320,20 +366,25 @@ def _log_likelihood_grad(
     ridge: float,
     prior_atk: list[float] | None = None,
     prior_dfn: list[float] | None = None,
+    injury_weight: float = 0.0,
+    fit_injury_weight: bool = False,
 ):
     n = d.n_teams
     g_atk = [0.0] * n
     g_dfn = [0.0] * n
     g_base = 0.0
     g_hfa = 0.0
+    g_injury = 0.0
     total = 0.0
 
     for k in range(len(d)):
         h = d.home_idx[k]
         a = d.away_idx[k]
         w = d.weight[k]
-        eta_h = min(base + atk[h] - dfn[a] + hfa, _MAX_LOG_GOALS)
-        eta_a = min(base + atk[a] - dfn[h], _MAX_LOG_GOALS)
+        diff = d.away_injuries[k] - d.home_injuries[k] if d.home_injuries else 0.0
+        inj = injury_weight * diff
+        eta_h = min(base + atk[h] - dfn[a] + hfa + inj, _MAX_LOG_GOALS)
+        eta_a = min(base + atk[a] - dfn[h] - inj, _MAX_LOG_GOALS)
         lam = math.exp(eta_h)
         mu = math.exp(eta_a)
 
@@ -348,6 +399,9 @@ def _log_likelihood_grad(
         g_dfn[h] -= res_a
         g_base += res_h + res_a
         g_hfa += res_h
+        # d(eta_h)/d(injury_weight) = diff, d(eta_a)/d(injury_weight) = -diff
+        if fit_injury_weight:
+            g_injury += diff * (res_h - res_a)
 
     if ridge:
         pa = prior_atk or [0.0] * n
@@ -359,7 +413,7 @@ def _log_likelihood_grad(
             g_atk[i] -= 2.0 * ridge * da
             g_dfn[i] -= 2.0 * ridge * dd
 
-    return total, g_atk, g_dfn, g_base, g_hfa
+    return total, g_atk, g_dfn, g_base, g_hfa, g_injury
 
 
 def _recenter(atk: list[float], dfn: list[float], base: float) -> float:
@@ -426,12 +480,25 @@ def fit(
     prior_strength: float = config.NEWCOMER_PRIOR_STRENGTH,
     season_break_days: float = config.SEASON_BREAK_DAYS,
     xg_weight: float = config.XG_WEIGHT,
+    fit_injury_weight: bool = False,
 ) -> PoissonDixonColes:
     """Fit ratings by weighted maximum likelihood.
 
     `ref_date` is the point in time the model is fit *as of*; match weights
     decay relative to it. In a backtest this must be the date of the fixture
     being predicted, never the end of the dataset.
+
+    `fit_injury_weight` defaults off, and should stay off. Validated against
+    real API-Football injury data (2021-2025, matched to specific fixtures):
+    RPS moved in opposite directions on two separate windows (-0.0003 on
+    2021-08..2023-05, +0.0010 on 2023-08..2025-05), the same "sign flips
+    between windows" signature that sank the ELO/ensemble experiment
+    (see the README). That is not a real, generalising effect -- it is an
+    extra free parameter finding whatever it can in each window's own noise.
+    The mechanism is kept, tested, and available for a future attempt at a
+    better-shaped signal (player importance, not raw headcount), but it must
+    not be turned on by default without a fresh validation showing a
+    consistent effect.
     """
     if not matches:
         raise ValueError("cannot fit a model on zero matches")
@@ -457,6 +524,8 @@ def fit(
         away_target=away_target,
         weight=weights,
         n_teams=n,
+        home_injuries=[float(getattr(m, "home_injuries", 0) or 0) for m in matches],
+        away_injuries=[float(getattr(m, "away_injuries", 0) or 0) for m in matches],
     )
 
     total_weight = sum(d.weight)
@@ -484,17 +553,23 @@ def fit(
         dfn = [warm_start.defence.get(t, 0.0) for t in teams]
         base = warm_start.base
         hfa = warm_start.home_advantage
+        # Forced to 0 unless this call explicitly asks for it: a caller must
+        # not silently inherit a nonzero coefficient from an earlier fit that
+        # happened to have fit_injury_weight=True.
+        injury_weight = warm_start.injury_weight if fit_injury_weight else 0.0
     else:
         atk = [0.0] * n
         dfn = [0.0] * n
         mean_goals = (weighted_home + weighted_away) / (2.0 * total_weight)
         base = math.log(max(mean_goals, 0.1))
         hfa = math.log(max(weighted_home, 1e-6) / max(weighted_away, 1e-6))
+        injury_weight = 0.0
 
     base = _recenter(atk, dfn, base)
 
-    ll, g_atk, g_dfn, g_base, g_hfa = _log_likelihood_grad(
-        d, atk, dfn, base, hfa, ridge, prior_atk, prior_dfn
+    ll, g_atk, g_dfn, g_base, g_hfa, g_injury = _log_likelihood_grad(
+        d, atk, dfn, base, hfa, ridge, prior_atk, prior_dfn,
+        injury_weight, fit_injury_weight,
     )
     step = 1.0 / max(total_weight, 1.0)
     iterations = 0
@@ -506,10 +581,11 @@ def fit(
             t_dfn = [dfn[i] + step * g_dfn[i] for i in range(n)]
             t_base = base + step * g_base
             t_hfa = hfa + step * g_hfa
+            t_injury = injury_weight + step * g_injury if fit_injury_weight else injury_weight
             t_base = _recenter(t_atk, t_dfn, t_base)
 
             ll_new = _log_likelihood(
-                d, t_atk, t_dfn, t_base, t_hfa, ridge, prior_atk, prior_dfn
+                d, t_atk, t_dfn, t_base, t_hfa, ridge, prior_atk, prior_dfn, t_injury
             )
             if ll_new > ll:
                 accepted = True
@@ -522,15 +598,16 @@ def fit(
             break
 
         improvement = ll_new - ll
-        atk, dfn, base, hfa, ll = t_atk, t_dfn, t_base, t_hfa, ll_new
+        atk, dfn, base, hfa, injury_weight, ll = t_atk, t_dfn, t_base, t_hfa, t_injury, ll_new
         iterations += 1
         step *= 1.3
 
         if improvement < tol * (1.0 + abs(ll)):
             break
 
-        _, g_atk, g_dfn, g_base, g_hfa = _log_likelihood_grad(
-            d, atk, dfn, base, hfa, ridge, prior_atk, prior_dfn
+        _, g_atk, g_dfn, g_base, g_hfa, g_injury = _log_likelihood_grad(
+            d, atk, dfn, base, hfa, ridge, prior_atk, prior_dfn,
+            injury_weight, fit_injury_weight,
         )
 
     rho = _fit_rho(d, atk, dfn, base, hfa) if fit_rho else 0.0
@@ -552,4 +629,5 @@ def fit(
         newcomer_defence=newcomer_defence,
         xg_weight=xg_weight,
         sot_conversion=conversion,
+        injury_weight=injury_weight,
     )

@@ -307,6 +307,19 @@ class ShotMatch:
     away_sot: int
 
 
+@dataclass
+class InjuryMatch:
+    """A match carrying injury counts, as store.MatchRow does."""
+
+    match_date: date
+    home: str
+    away: str
+    home_goals: int
+    away_goals: int
+    home_injuries: int
+    away_injuries: int
+
+
 class TestExpectedGoalsProxy(unittest.TestCase):
     """Ratings can be fit to a shots-on-target proxy instead of raw goals.
 
@@ -394,6 +407,114 @@ class TestExpectedGoalsProxy(unittest.TestCase):
         model = poisson.fit(matches, half_life_days=1e9, ridge=0.01, xg_weight=1.0)
         self.assertGreaterEqual(model.rho, -0.25)
         self.assertLessEqual(model.rho, 0.25)
+
+
+class TestInjuryWeight(unittest.TestCase):
+    """A per-fixture injury-count covariate on the linear predictor.
+
+    Validated against real 2021-2025 API-Football data and rejected: RPS
+    moved in opposite directions on two separate windows (-0.0003 held-out,
+    +0.0010 tuned-on), the same "sign flips between windows" signature that
+    sank the ELO/ensemble experiment. `fit_injury_weight` defaults False for
+    that reason. These tests only cover the mechanism -- that it fits, stays
+    off unless asked, and moves predictions the intuitive direction on data
+    with a known planted effect -- not that it should be relied on.
+    """
+
+    def _league(self, rng_seed=3):
+        """Home and Away are equal quality. Home scores fewer goals in
+        matches where it is missing more players -- a planted, known effect
+        the fitter should be able to recover."""
+        rng = random.Random(rng_seed)
+        matches = []
+        day = date(2023, 1, 1)
+        for _ in range(200):
+            injuries = rng.choice([0, 0, 2, 5])
+            # each missing player knocks the scoring rate down a bit
+            rate = max(1.6 - 0.12 * injuries, 0.2)
+            hg = _poisson_sample(rng, rate)
+            ag = _poisson_sample(rng, 1.6)
+            matches.append(InjuryMatch(day, "Home", "Away", hg, ag, injuries, 0))
+            day += timedelta(days=2)
+        return matches
+
+    def test_off_by_default(self):
+        matches = self._league()
+        model = poisson.fit(matches, half_life_days=1e9, ridge=0.05)
+        self.assertEqual(model.injury_weight, 0.0)
+
+    def test_stays_off_even_with_a_warm_start(self):
+        """A caller that never asks for it must never get it by accident."""
+        matches = self._league()
+        warm = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        self.assertNotEqual(warm.injury_weight, 0.0)
+        cold_again = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05,
+            warm_start=warm, fit_injury_weight=False,
+        )
+        self.assertEqual(cold_again.injury_weight, 0.0)
+
+    def test_recovers_the_planted_direction(self):
+        """More home injuries should mean fewer home goals, so the fitted
+        coefficient must come out positive under this module's sign
+        convention (see expected_goals)."""
+        matches = self._league()
+        model = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        self.assertGreater(model.injury_weight, 0.0)
+
+    def test_predictions_shift_with_the_injury_count(self):
+        matches = self._league()
+        model = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        healthy = model.predict("Home", "Away", home_injuries=0, away_injuries=0)
+        weakened = model.predict("Home", "Away", home_injuries=5, away_injuries=0)
+        self.assertGreater(healthy.p_home, weakened.p_home)
+        self.assertLess(healthy.p_away, weakened.p_away)
+
+    def test_only_the_differential_matters(self):
+        """Both sides down the same number of players should cancel out."""
+        matches = self._league()
+        model = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        even_0 = model.predict("Home", "Away", home_injuries=0, away_injuries=0)
+        even_3 = model.predict("Home", "Away", home_injuries=3, away_injuries=3)
+        self.assertAlmostEqual(even_0.p_home, even_3.p_home, places=9)
+
+    def test_probabilities_still_sum_to_one(self):
+        matches = self._league()
+        model = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        out = model.predict("Home", "Away", home_injuries=4, away_injuries=1)
+        self.assertAlmostEqual(sum(out.as_tuple()), 1.0, places=6)
+
+    def test_matches_without_injury_data_are_unaffected(self):
+        """Backfilled history has no injury fields at all; fitting must not
+        crash and must behave as if every count were zero."""
+        matches, *_ = synthetic_season()  # FakeMatch has no injury fields
+        model = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.01, fit_injury_weight=True
+        )
+        out = model.predict("T00", "T01")
+        self.assertAlmostEqual(sum(out.as_tuple()), 1.0, places=6)
+
+    def test_warm_start_carries_the_weight_forward(self):
+        matches = self._league()
+        first = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05, fit_injury_weight=True
+        )
+        second = poisson.fit(
+            matches, half_life_days=1e9, ridge=0.05,
+            warm_start=first, fit_injury_weight=True, max_iter=1,
+        )
+        # one more iteration from an already-converged start should barely move
+        self.assertAlmostEqual(first.injury_weight, second.injury_weight, delta=0.01)
 
 
 class TestPoissonPmf(unittest.TestCase):

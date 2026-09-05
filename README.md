@@ -277,6 +277,41 @@ The mechanism is still in the code behind `SEASON_BREAK_DAYS = 0`, because it
 is one line and may behave differently in another league. Do not raise it for
 the EPL without rerunning that sweep.
 
+**A per-fixture injury-count covariate**, fed by a real data source this time
+rather than a proxy: API-Football's injuries endpoint, matched to specific
+fixtures (`prescore/ingest/api_football.py`, `db/schema.sql`'s `injuries`
+table). The free tier blocks the current season entirely — every request
+returns `"Free plans do not have access to this season, try from 2022 to
+2024"` — so a Pro subscription was bought specifically to unlock it. 16,582
+records were ingested and matched, covering 2020–2026 with real per-fixture
+detail (player, reason, date).
+
+The mechanism (`fit_injury_weight` in `poisson.fit`) works correctly — it
+recovers a planted effect on synthetic data, moves predictions the intuitive
+direction, and stays off unless explicitly requested (see
+`tests/test_model.py::TestInjuryWeight`, which also caught a real bug: a
+`warm_start` carrying a nonzero weight from an earlier fit was leaking through
+even when the current call asked for it to stay off). But on real data it
+fails the same test the ELO ensemble failed:
+
+| window | baseline | +injuries | change |
+|---|---:|---:|---:|
+| held-out 2021-08–2023-05 | 0.2015 | 0.2011 | −0.0003 |
+| tuned-on 2023-08–2025-05 | 0.1935 | 0.1945 | **+0.0010** |
+
+Opposite signs again, both changes smaller than the noise floor the
+hyperparameter sweep already established (0.003 wide). A raw injury *count*
+probably isn't the right shape for the signal — losing three backup players
+isn't the same as losing a first-choice striker and keeper, and the model's
+existing time-decayed recent-form weighting likely already captures a good
+share of "this team has been worse lately" without needing injuries spelled
+out separately. The mechanism, the data feed, and the validation harness are
+all kept; a future attempt would need to weight by player importance, not
+headcount.
+
+Not shipped, consistent with the freeze below: this was investigation and
+infrastructure work with the default behaviour unchanged, not a model change.
+
 ### The model is frozen
 
 **Frozen 2026-08-12, ahead of the first graded matchweek on 2026-08-21.**

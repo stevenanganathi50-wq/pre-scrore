@@ -88,6 +88,7 @@ def describe() -> str:
             f"SUPABASE_URL               {get('SUPABASE_URL') or 'MISSING'}",
             f"SUPABASE_ANON_KEY          {state('SUPABASE_ANON_KEY')}",
             f"SUPABASE_SERVICE_ROLE_KEY  {state('SUPABASE_SERVICE_ROLE_KEY')}",
+            f"API_FOOTBALL_KEY           {state('API_FOOTBALL_KEY')}",
             f"source                     {ENV_PATH if ENV_PATH.exists() else 'environment only'}",
         ]
     )

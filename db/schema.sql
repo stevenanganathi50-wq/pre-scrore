@@ -61,6 +61,26 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_date ON matches (match_date);
 CREATE INDEX IF NOT EXISTS idx_matches_status ON matches (status, match_date);
 
+-- Injuries: a variable-count list per team per fixture, so unlike shots this
+-- cannot live as flat columns on `matches`. match_id is resolved at ingest
+-- time (team + fixture date -> our own match row) and left NULL when no
+-- match could be matched, so a resolution gap is visible rather than the row
+-- being silently dropped.
+CREATE TABLE IF NOT EXISTS injuries (
+    id            INTEGER PRIMARY KEY,
+    source        TEXT NOT NULL,
+    league        TEXT NOT NULL,
+    match_id      INTEGER REFERENCES matches(id),
+    team_id       INTEGER NOT NULL REFERENCES teams(id),
+    player_name   TEXT NOT NULL,
+    reason        TEXT,
+    fixture_date  TEXT NOT NULL,  -- as given by the source; used for matching and audit
+    ingested_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (source, team_id, player_name, fixture_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_injuries_match ON injuries (match_id);
+
 -- Published predictions. Written once, before kickoff, never updated.
 CREATE TABLE IF NOT EXISTS predictions (
     id             INTEGER PRIMARY KEY,

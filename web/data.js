@@ -1,5 +1,5 @@
 window.PRESCORE_DATA = {
-  "generated_at": "2026-09-05T09:56:21Z",
+  "generated_at": "2026-09-05T10:15:23Z",
   "league": "English Premier League",
   "league_code": "EPL",
   "model_version": "poisson-dc-1.2",

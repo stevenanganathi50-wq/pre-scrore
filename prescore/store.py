@@ -92,6 +92,12 @@ class MatchRow:
     away_shots: int | None = None
     home_sot: int | None = None
     away_sot: int | None = None
+    # Counted, not nullable: 0 means "no reported injuries or no data for this
+    # era" -- callers that care about the difference (e.g. the injury-weight
+    # validation study) are responsible for restricting themselves to seasons
+    # with real source coverage, since the count alone can't distinguish them.
+    home_injuries: int = 0
+    away_injuries: int = 0
 
 
 def upsert_match(
@@ -374,7 +380,11 @@ def finished_matches(
                m.home_goals, m.away_goals, m.result,
                m.closing_odds_home, m.closing_odds_draw, m.closing_odds_away,
                m.home_shots, m.away_shots,
-               m.home_shots_on_target, m.away_shots_on_target
+               m.home_shots_on_target, m.away_shots_on_target,
+               (SELECT count(*) FROM injuries i
+                WHERE i.match_id = m.id AND i.team_id = m.home_team_id) AS home_injuries,
+               (SELECT count(*) FROM injuries i
+                WHERE i.match_id = m.id AND i.team_id = m.away_team_id) AS away_injuries
         FROM matches m
         JOIN teams h ON h.id = m.home_team_id
         JOIN teams a ON a.id = m.away_team_id
@@ -400,9 +410,98 @@ def finished_matches(
             away_shots=r["away_shots"],
             home_sot=r["home_shots_on_target"],
             away_sot=r["away_shots_on_target"],
+            home_injuries=int(r["home_injuries"]),
+            away_injuries=int(r["away_injuries"]),
         )
         for r in rows
     ]
+
+
+def match_id_for_team_on_date(
+    conn: sqlite3.Connection, team_id: int, match_date: str, league: str
+) -> int | None:
+    """The one match `team_id` played in `league` on `match_date`, if any.
+
+    A team plays at most one match per day within a single league, so this is
+    unambiguous. Used to resolve an injury record (source: team + fixture
+    date) onto our own match row without needing the source's own match ids.
+    """
+    row = conn.execute(
+        """
+        SELECT id FROM matches
+        WHERE league = ? AND match_date = ?
+          AND (home_team_id = ? OR away_team_id = ?)
+        """,
+        (league, match_date, team_id, team_id),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def insert_injury(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    league: str,
+    match_id: int | None,
+    team_id: int,
+    player_name: str,
+    reason: str | None,
+    fixture_date: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO injuries (
+            source, league, match_id, team_id, player_name, reason, fixture_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source, team_id, player_name, fixture_date) DO UPDATE SET
+            match_id = coalesce(excluded.match_id, injuries.match_id),
+            reason   = coalesce(excluded.reason, injuries.reason)
+        """,
+        (source, league, match_id, team_id, player_name, reason, fixture_date),
+    )
+
+
+def resolve_pending_injuries(conn: sqlite3.Connection, league: str) -> int:
+    """Re-attempt matching for injury rows stored before their fixture existed
+    locally. `insert_injury` never drops a row for lack of a match -- this is
+    the catch-up pass that lets a later fixture sync retroactively fill it in.
+    """
+    cur = conn.execute(
+        """
+        UPDATE injuries SET match_id = (
+            SELECT m.id FROM matches m
+            WHERE m.league = injuries.league
+              AND m.match_date = injuries.fixture_date
+              AND (m.home_team_id = injuries.team_id OR m.away_team_id = injuries.team_id)
+        )
+        WHERE match_id IS NULL AND league = ?
+          AND EXISTS (
+            SELECT 1 FROM matches m
+            WHERE m.league = injuries.league
+              AND m.match_date = injuries.fixture_date
+              AND (m.home_team_id = injuries.team_id OR m.away_team_id = injuries.team_id)
+          )
+        """,
+        (league,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def injury_counts(conn: sqlite3.Connection, league: str) -> dict[str, int]:
+    """How many injury records resolved onto a match, by season -- the
+    coverage map a validation study needs to pick a real-data window."""
+    rows = conn.execute(
+        """
+        SELECT m.season AS season, count(*) AS n
+        FROM injuries i
+        JOIN matches m ON m.id = i.match_id
+        WHERE m.league = ?
+        GROUP BY m.season ORDER BY m.season
+        """,
+        (league,),
+    ).fetchall()
+    return {int(r["season"]): int(r["n"]) for r in rows}
 
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
