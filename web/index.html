@@ -5,42 +5,90 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pre-scrore — Premier League predictions with a public record</title>
 <meta name="description" content="Poisson-model predictions for Premier League matches, published before kickoff and graded against the result. Losses shown as openly as wins.">
+<meta name="theme-color" content="#f3f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1015" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚽</text></svg>">
+
+<!-- Applied before paint so there is no flash of the wrong theme on load. -->
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem("prescore-theme");
+    if (saved === "light" || saved === "dark") {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  } catch (e) {}
+})();
+</script>
 </head>
 <body>
 
 <header class="site-header">
   <div class="wrap">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">⚽</span>
-      <div>
-        <h1>pre-scrore</h1>
-        <p class="tagline" id="league-name">Premier League predictions</p>
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">⚽</span>
+        <div>
+          <h1>pre-scrore</h1>
+          <p class="tagline" id="league-name">Premier League predictions</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">
+          <span id="theme-icon" aria-hidden="true">◐</span>
+        </button>
       </div>
     </div>
-    <p class="disclaimer" id="disclaimer"></p>
+    <nav class="site-nav" aria-label="Sections">
+      <a href="#record-panel">Track record</a>
+      <a href="#upcoming-panel">Upcoming</a>
+      <a href="#results-panel">Results</a>
+      <a href="#method-panel">Method</a>
+    </nav>
   </div>
 </header>
 
+<div class="disclaimer-bar">
+  <p class="disclaimer wrap" id="disclaimer"></p>
+</div>
+
 <main class="wrap" id="main">
 
+  <div class="hero">
+    <h2>Predictions, published before kickoff. Every result, shown after.</h2>
+    <p>
+      A Poisson model predicts each match before it happens. The prediction is
+      written to a database that will not let it be edited or deleted, so the
+      record here is exactly what was said in advance — wins and losses both.
+    </p>
+  </div>
+
   <section class="panel" id="record-panel" aria-labelledby="record-heading">
-    <h2 id="record-heading">Track record</h2>
+    <div class="section-head">
+      <h2 id="record-heading">Track record</h2>
+    </div>
     <div id="record-body"><p class="muted">Loading…</p></div>
   </section>
 
-  <section class="panel" aria-labelledby="upcoming-heading">
-    <h2 id="upcoming-heading">Upcoming predictions</h2>
+  <section class="panel" id="upcoming-panel" aria-labelledby="upcoming-heading">
+    <div class="section-head">
+      <h2 id="upcoming-heading">Upcoming predictions</h2>
+      <span class="section-count" id="upcoming-count"></span>
+    </div>
     <p class="panel-note">
-      Every prediction below was written to the database before kickoff and
-      cannot be edited afterwards.
+      Written to the database before kickoff and immutable afterwards. Where a
+      fixture has predictions from more than one model version, the current
+      one leads — expand <strong>all versions</strong> to see how they compare.
     </p>
     <div id="upcoming-body"><p class="muted">Loading…</p></div>
   </section>
 
-  <section class="panel" aria-labelledby="results-heading">
-    <h2 id="results-heading">Results</h2>
+  <section class="panel" id="results-panel" aria-labelledby="results-heading">
+    <div class="section-head">
+      <h2 id="results-heading">Results</h2>
+      <span class="section-count" id="results-count"></span>
+    </div>
     <p class="panel-note">
       Graded predictions, newest first. Misses are shown alongside hits — a
       record that hides its losses is worth nothing.
@@ -48,8 +96,10 @@
     <div id="results-body"><p class="muted">Loading…</p></div>
   </section>
 
-  <section class="panel" aria-labelledby="method-heading">
-    <h2 id="method-heading">How this works</h2>
+  <section class="panel" id="method-panel" aria-labelledby="method-heading">
+    <div class="section-head">
+      <h2 id="method-heading">How this works</h2>
+    </div>
     <div class="method">
       <p>
         Each team carries an <strong>attack</strong> and a <strong>defence</strong>
@@ -70,6 +120,14 @@
         the pick is usually home or away. Read the probabilities, not just the
         pick.
       </p>
+      <p>
+        <strong>Predictions are never overwritten.</strong> When the model
+        changes, the new version is published alongside the old one rather than
+        replacing it, so every fixture can show how each version called it.
+        The headline accuracy figure only ever reflects one version at a
+        time — averaging different predictors together would misrepresent
+        both of them.
+      </p>
       <p class="muted" id="model-meta"></p>
     </div>
   </section>
@@ -83,6 +141,9 @@
       not a recommendation to wager.
     </p>
     <p class="muted" id="generated-at"></p>
+    <p class="footer-links">
+      <a href="https://github.com/stevenanganathi50-wq/pre-scrore" target="_blank" rel="noopener">Source</a>
+    </p>
   </div>
 </footer>
 

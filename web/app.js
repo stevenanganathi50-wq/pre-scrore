@@ -34,21 +34,56 @@
     });
   }
 
+  // --- theme toggle ---------------------------------------------------
+
+  function initTheme() {
+    const btn = document.getElementById("theme-toggle");
+    const icon = document.getElementById("theme-icon");
+    const root = document.documentElement;
+
+    function systemPrefersDark() {
+      return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+
+    function currentTheme() {
+      const explicit = root.getAttribute("data-theme");
+      if (explicit === "light" || explicit === "dark") return explicit;
+      return systemPrefersDark() ? "dark" : "light";
+    }
+
+    function paintIcon() {
+      icon.textContent = currentTheme() === "dark" ? "☀" : "☾";
+    }
+
+    btn.addEventListener("click", function () {
+      const next = currentTheme() === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try {
+        localStorage.setItem("prescore-theme", next);
+      } catch (e) {}
+      paintIcon();
+    });
+
+    paintIcon();
+  }
+
+  // --- shared bits ------------------------------------------------------
+
   const OUTCOME_LABEL = { H: "Home", D: "Draw", A: "Away" };
 
-  function pickLabel(entry) {
-    if (entry.pick === "H") return escapeHtml(entry.home);
-    if (entry.pick === "A") return escapeHtml(entry.away);
+  function pickLabel(match, pick) {
+    if (pick === "H") return escapeHtml(match.home);
+    if (pick === "A") return escapeHtml(match.away);
     return "Draw";
   }
 
   /* A stacked bar is more honest than a single headline number: it shows how
    * much of the probability mass actually sits behind the pick. */
-  function probabilityBar(entry) {
+  function probabilityBar(home, away, p) {
     const segs = [
-      { key: "h", value: entry.p_home },
-      { key: "d", value: entry.p_draw },
-      { key: "a", value: entry.p_away },
+      { key: "h", value: p.p_home },
+      { key: "d", value: p.p_draw },
+      { key: "a", value: p.p_away },
     ];
     const bar = segs
       .map(
@@ -60,19 +95,19 @@
       .join("");
 
     return (
-      `<div class="bar" role="img" aria-label="Home ${pct(entry.p_home)}, ` +
-      `draw ${pct(entry.p_draw)}, away ${pct(entry.p_away)}">${bar}</div>` +
+      `<div class="bar" role="img" aria-label="Home ${pct(p.p_home)}, ` +
+      `draw ${pct(p.p_draw)}, away ${pct(p.p_away)}">${bar}</div>` +
       `<div class="bar-key">` +
-      `<span>${escapeHtml(entry.home)} ${pct(entry.p_home)}</span>` +
-      `<span>Draw ${pct(entry.p_draw)}</span>` +
-      `<span>${escapeHtml(entry.away)} ${pct(entry.p_away)}</span>` +
+      `<span><span class="dot dot-h"></span>${escapeHtml(home)} ${pct(p.p_home)}</span>` +
+      `<span><span class="dot dot-d"></span>Draw ${pct(p.p_draw)}</span>` +
+      `<span><span class="dot dot-a"></span>${escapeHtml(away)} ${pct(p.p_away)}</span>` +
       `</div>`
     );
   }
 
-  function thinHistoryBadge(entry) {
-    if (!entry.thin_history || !entry.thin_history.length) return "";
-    const names = entry.thin_history.map(escapeHtml).join(", ");
+  function thinHistoryBadge(match) {
+    if (!match.thin_history || !match.thin_history.length) return "";
+    const names = match.thin_history.map(escapeHtml).join(", ");
     return (
       `<span class="badge badge-warn" title="Little or no Premier League ` +
       `history in our data, so this team is rated near league average.">` +
@@ -80,9 +115,55 @@
     );
   }
 
-  function renderUpcoming(entries) {
+  /* Every model version that predicted a fixture, in one compact table --
+   * "alongside the others" rather than picking a winner and hiding the rest. */
+  function versionsTable(match, graded) {
+    if (match.predictions.length < 2) return "";
+
+    const rows = match.predictions
+      .map((p) => {
+        const gradeCell = !graded
+          ? ""
+          : p.is_hit === null
+          ? "—"
+          : p.is_hit
+          ? '<span class="badge badge-hit">hit</span>'
+          : '<span class="badge badge-miss">miss</span>';
+        return (
+          `<tr class="${p.is_current ? "is-current" : ""}">` +
+          `<td><span class="version-pill">${escapeHtml(p.model_version)}` +
+          (p.is_current ? '<span class="version-current-tag">current</span>' : "") +
+          `</span></td>` +
+          `<td class="num">${pct(p.p_home)}</td>` +
+          `<td class="num">${pct(p.p_draw)}</td>` +
+          `<td class="num">${pct(p.p_away)}</td>` +
+          `<td>${pickLabel(match, p.pick)}</td>` +
+          (graded ? `<td>${gradeCell}</td>` : "") +
+          `</tr>`
+        );
+      })
+      .join("");
+
+    return (
+      '<details class="versions-toggle">' +
+      `<summary class="versions-summary"><span class="chev">▸</span> ` +
+      `all ${match.predictions.length} model versions</summary>` +
+      '<div class="versions-table-wrap"><table class="versions-table"><thead><tr>' +
+      `<th>Version</th><th class="num">Home</th><th class="num">Draw</th>` +
+      `<th class="num">Away</th><th>Pick</th>` +
+      (graded ? "<th>Result</th>" : "") +
+      `</tr></thead><tbody>${rows}</tbody></table></div>` +
+      "</details>"
+    );
+  }
+
+  function renderUpcoming(matches) {
     const el = document.getElementById("upcoming-body");
-    if (!entries.length) {
+    document.getElementById("upcoming-count").textContent = matches.length
+      ? matches.length + (matches.length === 1 ? " fixture" : " fixtures")
+      : "";
+
+    if (!matches.length) {
       el.innerHTML =
         '<p class="muted">No upcoming fixtures have been predicted yet. ' +
         "Run <code>python -m prescore run</code> to sync fixtures and publish.</p>";
@@ -91,26 +172,33 @@
 
     el.innerHTML =
       '<div class="fixture-list">' +
-      entries
-        .map(
-          (e) =>
+      matches
+        .map(function (m) {
+          const current = m.predictions[0];
+          return (
             '<article class="fixture">' +
             '<div class="fixture-head">' +
-            `<span class="teams">${escapeHtml(e.home)} v ${escapeHtml(e.away)}</span>` +
-            `<span class="badge badge-pick">pick: ${pickLabel(e)}</span>` +
-            thinHistoryBadge(e) +
-            `<span class="kickoff">${formatKickoff(e.kickoff_utc)}</span>` +
+            `<span class="teams">${escapeHtml(m.home)} v ${escapeHtml(m.away)}</span>` +
+            `<span class="badge badge-pick">pick: ${pickLabel(m, current.pick)}</span>` +
+            thinHistoryBadge(m) +
+            `<span class="kickoff">${formatKickoff(m.kickoff_utc)}</span>` +
             "</div>" +
-            probabilityBar(e) +
+            probabilityBar(m.home, m.away, current) +
+            versionsTable(m, false) +
             "</article>"
-        )
+          );
+        })
         .join("") +
       "</div>";
   }
 
-  function renderResults(entries) {
+  function renderResults(matches) {
     const el = document.getElementById("results-body");
-    if (!entries.length) {
+    document.getElementById("results-count").textContent = matches.length
+      ? matches.length + (matches.length === 1 ? " match" : " matches")
+      : "";
+
+    if (!matches.length) {
       el.innerHTML =
         '<p class="muted">Nothing graded yet. Results appear here once ' +
         "predicted matches have been played — wins and losses alike.</p>";
@@ -119,22 +207,27 @@
 
     el.innerHTML =
       '<div class="fixture-list">' +
-      entries
-        .map(function (e) {
-          const badge = e.is_hit
-            ? '<span class="badge badge-hit">hit</span>'
-            : '<span class="badge badge-miss">miss</span>';
+      matches
+        .map(function (m) {
+          const current = m.predictions[0];
+          const badge =
+            current.is_hit === null
+              ? ""
+              : current.is_hit
+              ? '<span class="badge badge-hit">hit</span>'
+              : '<span class="badge badge-miss">miss</span>';
           return (
             '<article class="fixture">' +
             '<div class="fixture-head">' +
-            `<span class="teams">${escapeHtml(e.home)} ` +
-            `<span class="score">${e.home_goals}–${e.away_goals}</span> ` +
-            `${escapeHtml(e.away)}</span>` +
+            `<span class="teams">${escapeHtml(m.home)} ` +
+            `<span class="score">${m.home_goals}–${m.away_goals}</span> ` +
+            `${escapeHtml(m.away)}</span>` +
             badge +
-            `<span class="badge badge-pick">picked: ${pickLabel(e)}</span>` +
-            `<span class="kickoff">${formatKickoff(e.kickoff_utc)}</span>` +
+            `<span class="badge badge-pick">picked: ${pickLabel(m, current.pick)}</span>` +
+            `<span class="kickoff">${formatKickoff(m.kickoff_utc)}</span>` +
             "</div>" +
-            probabilityBar(e) +
+            probabilityBar(m.home, m.away, current) +
+            versionsTable(m, true) +
             "</article>"
           );
         })
@@ -161,6 +254,42 @@
             "</tr>"
         )
         .join("") +
+      "</tbody></table></div>"
+    );
+  }
+
+  /* Side-by-side accuracy once more than one version has graded predictions.
+   * Nothing here until then -- an empty comparison table is worse than none. */
+  function versionComparisonTable(accuracyByVersion, currentVersion) {
+    const versions = Object.keys(accuracyByVersion || {});
+    if (versions.length < 2) return "";
+
+    const rows = versions
+      .map(function (v) {
+        const a = accuracyByVersion[v].overall;
+        const isCurrent = v === currentVersion;
+        return (
+          `<tr class="${isCurrent ? "is-current-row" : ""}">` +
+          `<td><span class="version-pill">${escapeHtml(v)}` +
+          (isCurrent ? '<span class="version-current-tag">current</span>' : "") +
+          `</span></td>` +
+          `<td class="num">${a.n}</td>` +
+          `<td class="num">${pct1(a.accuracy)}</td>` +
+          `<td class="num">${a.log_loss.toFixed(3)}</td>` +
+          `<td class="num">${a.rps.toFixed(3)}</td>` +
+          "</tr>"
+        );
+      })
+      .join("");
+
+    return (
+      "<h3>Compare model versions</h3>" +
+      '<div class="table-scroll"><table><thead><tr>' +
+      "<th>Version</th><th class=\"num\">Graded</th>" +
+      '<th class="num">Accuracy</th><th class="num">Log loss</th>' +
+      '<th class="num">RPS</th>' +
+      "</tr></thead><tbody>" +
+      rows +
       "</tbody></table></div>"
     );
   }
@@ -198,7 +327,7 @@
     }
 
     const stats = [
-      { label: "Accuracy", value: pct1(overall.accuracy) },
+      { label: "Accuracy", value: pct1(overall.accuracy), highlight: true },
       { label: "Graded", value: overall.n },
       { label: "Hits", value: overall.hits },
       { label: "Misses", value: overall.n - overall.hits },
@@ -212,35 +341,43 @@
         .map(
           (s) =>
             "<div>" +
-            `<div class="stat-value">${escapeHtml(s.value)}</div>` +
+            `<div class="stat-value${s.highlight ? " stat-highlight" : ""}">${escapeHtml(s.value)}</div>` +
             `<div class="stat-label">${escapeHtml(s.label)}</div>` +
             "</div>"
         )
         .join("") +
       "</div>" +
       confidenceTable(data.accuracy.by_confidence) +
+      versionComparisonTable(data.accuracy_by_version, data.model_version) +
       backtestCallout(data.backtest, true);
+  }
+
+  function modelMetaText(data) {
+    const versions = data.model_versions || [];
+    let meta = "Currently predicting with model " + data.model_version + ".";
+    if (versions.length > 1) {
+      const others = versions
+        .filter((v) => v.version !== data.model_version)
+        .map((v) => escapeHtml(v.version))
+        .join(", ");
+      meta +=
+        " " +
+        versions.length +
+        " versions have published into this record (" +
+        others +
+        " and the current one). Every fixture above shows all of them side by" +
+        " side under “all model versions” — nothing is deleted or" +
+        " hidden, and the headline accuracy figure only ever reflects one" +
+        " version at a time.";
+    }
+    return meta;
   }
 
   function render(data) {
     document.getElementById("league-name").textContent =
       data.league + " predictions";
     document.getElementById("disclaimer").textContent = data.disclaimer || "";
-    const versions = data.model_versions || [];
-    let meta = "Showing model " + data.model_version + ".";
-    if (versions.length > 1) {
-      const others = versions
-        .filter((v) => v.version !== data.model_version)
-        .map((v) => `${escapeHtml(v.version)} (${v.published})`)
-        .join(", ");
-      meta +=
-        " Earlier versions remain in the database and are not counted in the" +
-        " figures above, because averaging two different predictors into one" +
-        " accuracy number would misrepresent both. Superseded: " +
-        others +
-        ". Nothing has been deleted — published predictions cannot be.";
-    }
-    document.getElementById("model-meta").textContent = meta;
+    document.getElementById("model-meta").textContent = modelMetaText(data);
     document.getElementById("generated-at").textContent =
       "Data generated " + formatKickoff(data.generated_at) + ".";
 
@@ -258,6 +395,8 @@
         "</div></div>"
     );
   }
+
+  initTheme();
 
   if (window.PRESCORE_DATA) {
     render(window.PRESCORE_DATA);

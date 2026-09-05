@@ -394,13 +394,56 @@ class TestModelVersioning(PipelineTestCase):
         self.assertTrue(all(v["published"] == 1 for v in versions))
         self.assertTrue(all(v["graded"] == 1 for v in versions))
 
-    def test_export_shows_one_version_but_discloses_the_others(self):
+    def test_export_groups_every_version_onto_its_match(self):
+        """One match, two predictions -- v1 is not hidden, just not primary."""
         payload = export.build(self.conn, "EPL", model_version="v2")
         self.assertEqual(len(payload["results"]), 1)
-        self.assertEqual(payload["results"][0]["pick"], "H")
+        match = payload["results"][0]
         self.assertEqual(payload["model_version"], "v2")
+
+        preds = match["predictions"]
+        self.assertEqual(len(preds), 2)
+        self.assertEqual({p["model_version"] for p in preds}, {"v1", "v2"})
+
         disclosed = {v["version"] for v in payload["model_versions"]}
         self.assertIn("v1", disclosed)
+
+    def test_current_version_sorts_first(self):
+        """The active model leads the comparison regardless of version string
+        ordering -- 'v2' is not alphabetically or numerically special here."""
+        payload = export.build(self.conn, "EPL", model_version="v2")
+        preds = payload["results"][0]["predictions"]
+        self.assertTrue(preds[0]["is_current"])
+        self.assertEqual(preds[0]["model_version"], "v2")
+        self.assertFalse(preds[1]["is_current"])
+        self.assertEqual(preds[1]["model_version"], "v1")
+
+    def test_each_version_keeps_its_own_pick_and_grade(self):
+        """v1 called this wrong, v2 called it right -- both facts must survive
+        being grouped onto the same match."""
+        payload = export.build(self.conn, "EPL", model_version="v2")
+        by_version = {
+            p["model_version"]: p for p in payload["results"][0]["predictions"]
+        }
+        self.assertEqual(by_version["v2"]["pick"], "H")
+        self.assertTrue(by_version["v2"]["is_hit"])
+        self.assertEqual(by_version["v1"]["pick"], "A")
+        self.assertFalse(by_version["v1"]["is_hit"])
+
+    def test_match_level_facts_are_not_duplicated_per_version(self):
+        """The actual result belongs to the match, not to any one predictor."""
+        payload = export.build(self.conn, "EPL", model_version="v2")
+        match = payload["results"][0]
+        self.assertEqual(match["actual"], "H")
+        self.assertEqual(match["home_goals"], 3)
+        self.assertEqual(match["away_goals"], 0)
+
+    def test_accuracy_by_version_covers_every_graded_version(self):
+        payload = export.build(self.conn, "EPL", model_version="v2")
+        self.assertIn("v1", payload["accuracy_by_version"])
+        self.assertIn("v2", payload["accuracy_by_version"])
+        self.assertEqual(payload["accuracy_by_version"]["v1"]["overall"]["hits"], 0)
+        self.assertEqual(payload["accuracy_by_version"]["v2"]["overall"]["hits"], 1)
 
     def test_superseded_version_cannot_be_deleted(self):
         row = self.conn.execute(

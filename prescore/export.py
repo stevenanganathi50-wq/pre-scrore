@@ -76,17 +76,22 @@ def build(
     league: str = "EPL",
     model_version: str | None = config.MODEL_VERSION,
 ) -> dict:
-    """Build the site payload for one model version.
+    """Build the site payload.
 
     Published predictions are immutable, so an improved model is published
-    alongside the old one rather than replacing it. The site shows the current
-    version; superseded ones stay in the database as an auditable trail and
-    are listed under `model_versions` so the switch is visible rather than
-    quietly airbrushed.
+    alongside the old one rather than replacing it. Every fixture therefore
+    carries one entry per model version that predicted it -- `model_version`
+    (the current model) is flagged `is_current` and sorted first, but nothing
+    from a superseded version is hidden. The headline accuracy figure stays
+    scoped to one version at a time (mixing predictors would misrepresent
+    both); `accuracy_by_version` carries the same figures for every version
+    that has graded predictions, so they can be shown side by side once there
+    is enough live data to compare.
     """
     league_cfg = config.LEAGUES[league]
-    record = store.track_record(conn, league, model_version)
+    record = store.track_record(conn, league, None)
     counts = _history_counts(conn, league)
+    versions = store.model_versions(conn, league)
 
     def thin(row) -> list[str]:
         return [
@@ -95,45 +100,69 @@ def build(
             if counts.get(team, 0) < THIN_HISTORY_MATCHES
         ]
 
-    upcoming, results = [], []
+    matches: dict[int, dict] = {}
     for row in record:
-        entry = {
-            "match_id": row["match_id"],
-            "kickoff_utc": row["kickoff_utc"],
-            "round": row["round"],
-            "home": row["home"],
-            "away": row["away"],
-            "p_home": round(row["p_home"], 4),
-            "p_draw": round(row["p_draw"], 4),
-            "p_away": round(row["p_away"], 4),
-            "pick": row["pick"],
-            "confidence": round(row["confidence"], 4),
-            "predicted_at": row["predicted_at"],
-            "thin_history": thin(row),
-        }
-        if row["is_hit"] is None:
-            upcoming.append(entry)
-        else:
-            entry.update(
-                {
-                    "home_goals": row["home_goals"],
-                    "away_goals": row["away_goals"],
-                    "actual": row["actual"],
-                    "is_hit": bool(row["is_hit"]),
-                }
-            )
-            results.append(entry)
+        mid = row["match_id"]
+        match = matches.get(mid)
+        if match is None:
+            match = {
+                "match_id": mid,
+                "kickoff_utc": row["kickoff_utc"],
+                "round": row["round"],
+                "home": row["home"],
+                "away": row["away"],
+                "thin_history": thin(row),
+                "graded": row["status"] == "finished",
+                "home_goals": row["home_goals"],
+                "away_goals": row["away_goals"],
+                "actual": row["actual"],
+                "predictions": [],
+            }
+            matches[mid] = match
+
+        match["predictions"].append(
+            {
+                "model_version": row["model_version"],
+                "is_current": row["model_version"] == model_version,
+                "p_home": round(row["p_home"], 4),
+                "p_draw": round(row["p_draw"], 4),
+                "p_away": round(row["p_away"], 4),
+                "pick": row["pick"],
+                "confidence": round(row["confidence"], 4),
+                "predicted_at": row["predicted_at"],
+                "is_hit": None if row["is_hit"] is None else bool(row["is_hit"]),
+            }
+        )
+
+    upcoming, results = [], []
+    for match in matches.values():
+        # Newest version first lexically, then a stable pass pulls today's
+        # model to the very front regardless -- so the current prediction
+        # always leads, with every other version listed alongside it rather
+        # than hidden.
+        match["predictions"].sort(key=lambda p: p["model_version"], reverse=True)
+        match["predictions"].sort(key=lambda p: not p["is_current"])
+        (results if match["graded"] else upcoming).append(match)
 
     upcoming.sort(key=lambda e: e["kickoff_utc"] or "")
+    results.sort(key=lambda e: e["kickoff_utc"] or "", reverse=True)
+
+    accuracy_by_version = {}
+    for v in versions:
+        if v["graded"]:
+            accuracy_by_version[v["version"]] = publish.accuracy(
+                conn, league, v["version"]
+            )
 
     return {
         "generated_at": clock.now_iso(),
         "league": league_cfg.name,
         "league_code": league_cfg.code,
         "model_version": model_version or "all",
-        "model_versions": store.model_versions(conn, league),
+        "model_versions": versions,
         "disclaimer": DISCLAIMER,
         "accuracy": publish.accuracy(conn, league, model_version),
+        "accuracy_by_version": accuracy_by_version,
         "backtest": _latest_backtest(conn, league),
         "upcoming": upcoming,
         "results": results,
