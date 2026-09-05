@@ -555,13 +555,20 @@ backfilled.
 ### GitHub Actions (the always-on runner)
 
 `.github/workflows/cycle.yml` runs the same cycle every 6 hours on GitHub's
-infrastructure and deploys the site to Pages. Setup:
+infrastructure and deploys to Netlify (`pre-scrore.netlify.app`) — not GitHub
+Pages. An earlier version of this workflow deployed to Pages instead; that
+target was never enabled in this repo's settings and failed every single run
+with a 404 until it was replaced. Setup:
 
 1. Create a repository and push.
-2. Add three repository secrets under **Settings → Secrets and variables →
-   Actions**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
-3. Under **Settings → Pages**, set the source to **GitHub Actions**.
-4. Trigger it once by hand from the Actions tab to confirm.
+2. Add four repository secrets under **Settings → Secrets and variables →
+   Actions**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+   and `NETLIFY_AUTH_TOKEN` (create the latter at app.netlify.com → User
+   settings → Applications → New access token).
+3. Trigger it once by hand from the Actions tab to confirm.
+
+The site id is not a secret — it identifies the site, not who can deploy to
+it — so it sits directly in `cycle.yml` rather than as a repository secret.
 
 Tests live in a separate workflow on purpose. If a test regression blocked the
 cycle, a broken build would become *missing predictions*, and a missing
@@ -594,15 +601,18 @@ available and does not matter).
 ## What is not built yet
 
 - **The frontend still reads a static `data.json`.** The Actions workflow
-  regenerates and deploys it every 6 hours, so it stays fresh — but pointing
+  regenerates and redeploys it every 6 hours, so it stays fresh — but pointing
   the page at PostgREST with the anon key would make it genuinely live, and
   needs no new dependency.
-- **Nothing is pushed to GitHub yet.** The repository is initialised and
-  committed locally; the remote, the secrets and Pages are still to be set up.
+- **The Windows Task Scheduler job is a manual-only fallback.** It runs the
+  same cycle locally and has no cloud counterpart of its own; it is not needed
+  now that GitHub Actions runs the real cycle, but it is left in place in case
+  Actions is ever down.
 
-The 2026/27 season has not kicked off yet, so **the live record is empty**. The
-site says so plainly and shows the backtest in its place, clearly labelled as
-a backtest rather than a track record.
+The season kicked off on schedule and the record is real: as of the last
+successful run, 21 predictions are graded at 61.9% accuracy under the current
+model version. Losses are shown alongside hits on the site, exactly as
+designed.
 
 ---
 

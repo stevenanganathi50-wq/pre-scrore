@@ -1,6 +1,11 @@
 # pre-scrore scheduled cycle.
 # ingest -> pull -> run (fixtures, publish, grade, export) -> push -> deploy
 #
+# Deploys to Netlify (the actual live host, pre-scrore.netlify.app), not
+# GitHub Pages -- Pages was never enabled for this repo, since Netlify was
+# chosen instead. An earlier version of this workflow tried to deploy to
+# Pages anyway and failed every run with a 404; this replaced it.
+#
 # `pull` is not optional. A runner starts with no database, so without it
 # `publish` would re-predict fixtures that are already public and `grade`
 # would score those local rows rather than the ones actually published,
@@ -29,8 +34,6 @@ concurrency:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   cycle:
@@ -39,6 +42,9 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # Not secret -- it's a site identifier, not a credential. It already
+      # appears in this project's own deploy logs and README.
+      NETLIFY_SITE_ID: 8f6968e1-4f4d-4561-927c-7cca99528d15
     steps:
       - uses: actions/checkout@v4
 
@@ -80,17 +86,15 @@ jobs:
       - name: Show the record
         run: python -m prescore status
 
-      - name: Upload the site
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
-
-  deploy:
-    needs: cycle
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      # ubuntu-latest ships Node.js, so this needs no extra setup step.
+      # Pinned to the major version already verified locally (netlify-cli
+      # 27.0.1), matching how the actions/* steps above are pinned.
+      - name: Deploy to Netlify
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ]; then
+            echo "::error::NETLIFY_AUTH_TOKEN is not set. Add it under Settings -> Secrets and variables -> Actions (create it at app.netlify.com -> User settings -> Applications -> New access token)."
+            exit 1
+          fi
+          npx --yes netlify-cli@27 deploy --prod --dir=web --site="$NETLIFY_SITE_ID"
