@@ -6,6 +6,7 @@ import unittest
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from prescore import config
 from prescore.model import poisson
 
 
@@ -407,6 +408,103 @@ class TestExpectedGoalsProxy(unittest.TestCase):
         model = poisson.fit(matches, half_life_days=1e9, ridge=0.01, xg_weight=1.0)
         self.assertGreaterEqual(model.rho, -0.25)
         self.assertLessEqual(model.rho, 0.25)
+
+
+class TestTemperatureWiring(unittest.TestCase):
+    """`temperature` is a pure passthrough -- never fit inside `fit()`, see
+    prescore/model/calibration.py. Defaults to the externally-fit production
+    value (config.CALIBRATION_TEMPERATURE), same lifecycle as xg_weight;
+    identity (1.0, a true no-op) is available by passing it explicitly.
+    These only check the wiring, not whether the production value is a good
+    one -- that is what tests/test_calibration.py and the README's validation
+    numbers are for."""
+
+    def setUp(self):
+        matches, *_ = synthetic_season()
+        self.matches = matches
+
+    def test_default_is_the_production_value(self):
+        model = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        self.assertEqual(model.temperature, config.CALIBRATION_TEMPERATURE)
+
+    def test_default_matches_explicitly_requesting_the_production_value(self):
+        default = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        explicit = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05,
+            temperature=config.CALIBRATION_TEMPERATURE,
+        )
+        self.assertEqual(
+            default.predict("T00", "T01").as_tuple(),
+            explicit.predict("T00", "T01").as_tuple(),
+        )
+
+    def test_identity_is_available_explicitly(self):
+        """1.0 must still give the true, uncalibrated raw probabilities --
+        needed by anything (like the calibration validation script) that
+        wants the model's output before any correction is applied."""
+        calibrated = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        raw = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=1.0
+        )
+        self.assertEqual(raw.temperature, 1.0)
+        self.assertNotEqual(
+            raw.predict("T00", "T01").as_tuple(),
+            calibrated.predict("T00", "T01").as_tuple(),
+        )
+
+    def test_sharpening_moves_the_pick_probability_up(self):
+        model = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=0.6
+        )
+        baseline = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        out = model.predict("T00", "T01")
+        base_out = baseline.predict("T00", "T01")
+        self.assertGreater(out.confidence, base_out.confidence)
+
+    def test_does_not_affect_expected_goals(self):
+        """Calibration corrects the 1X2 probability, not the underlying rate."""
+        baseline = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        calibrated = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=0.5
+        )
+        b_out = baseline.predict("T00", "T01")
+        c_out = calibrated.predict("T00", "T01")
+        self.assertAlmostEqual(
+            b_out.expected_home_goals, c_out.expected_home_goals, places=9
+        )
+        self.assertAlmostEqual(
+            b_out.expected_away_goals, c_out.expected_away_goals, places=9
+        )
+
+    def test_does_not_affect_the_raw_score_matrix(self):
+        """score_matrix stays raw/uncalibrated -- only predict()'s aggregated
+        H/D/A gets the correction, since exact-score markets aren't in scope."""
+        baseline = poisson.fit(self.matches, half_life_days=1e9, ridge=0.05)
+        calibrated = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=0.5
+        )
+        m1 = baseline.score_matrix("T00", "T01")
+        m2 = calibrated.score_matrix("T00", "T01")
+        self.assertEqual(m1, m2)
+
+    def test_reported_in_params(self):
+        model = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=0.7
+        )
+        self.assertEqual(model.params()["temperature"], 0.7)
+
+    def test_warm_start_does_not_leak_a_temperature(self):
+        """Same footgun class as injury_weight: a caller that doesn't specify
+        temperature must get THIS call's default, not whatever an earlier,
+        differently-configured warm_start happened to carry."""
+        warm = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, temperature=0.5
+        )
+        cold_again = poisson.fit(
+            self.matches, half_life_days=1e9, ridge=0.05, warm_start=warm
+        )
+        self.assertEqual(cold_again.temperature, config.CALIBRATION_TEMPERATURE)
+        self.assertNotEqual(cold_again.temperature, warm.temperature)
 
 
 class TestInjuryWeight(unittest.TestCase):

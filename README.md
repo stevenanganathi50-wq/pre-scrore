@@ -312,18 +312,14 @@ headcount.
 Not shipped, consistent with the freeze below: this was investigation and
 infrastructure work with the default behaviour unchanged, not a model change.
 
-### The model is frozen
+### The model is frozen — with one authorised exception
 
 **Frozen 2026-08-12, ahead of the first graded matchweek on 2026-08-21.**
 
-Frozen configuration: `poisson-dc-1.2`, half-life 270 days, ridge 0.05,
-`xg_weight` 0.5, newcomer prior on.
-
-Why: three changes have now been measured against the backtest and none
-against reality. The published record contains zero graded predictions. One
-real matchweek is worth more than another tuning pass over the same 3,040
-historical fixtures, and swapping predictors underneath a track record is
-precisely what makes track records worthless.
+Why: three changes had been measured against the backtest and none against
+reality at the time. One real matchweek is worth more than another tuning
+pass over the same 3,040 historical fixtures, and swapping predictors
+underneath a track record is precisely what makes track records worthless.
 
 **Still allowed:** bug fixes, infrastructure, scheduling, the frontend, and
 anything that does not change what the model predicts for a given fixture.
@@ -334,9 +330,13 @@ anything that does not change what the model predicts for a given fixture.
 roughly 100, about ten matchweeks — so that changes can be judged against
 live results rather than backtest noise. Sooner if a genuine bug is found.
 
-The known open item is v1.2's under-confidence at the top of the range
-(it says 74% and delivers 80%). A calibration step is the obvious fix and it
-waits for the thaw.
+**The one exception:** `poisson-dc-1.3` (calibration, below) shipped on
+2026-09-05 at 21 graded predictions, by explicit decision, specifically to fix
+the known top-end under-confidence flaw rather than wait out the freeze. This
+does not lift the freeze generally — hyperparameters, model structure, and new
+features otherwise remain off the table until the same ~100-prediction bar is
+met, this one change included; if it turns out to be wrong once real results
+accumulate, it gets corrected the same way anything else would.
 
 ### Model versions
 
@@ -348,9 +348,58 @@ retroactively — only published alongside, under a new version.
 | `poisson-dc-1.0` | Poisson + Dixon-Coles, time decay, uniform ridge |
 | `poisson-dc-1.1` | newcomer prior for teams with little or no history |
 | `poisson-dc-1.2` | ratings fit to a goals/shots-on-target blend |
+| `poisson-dc-1.3` | temperature scaling on the final H/D/A probabilities |
 
 The accuracy views group by `model_version`, so each version carries its own
 record and they can never be silently averaged together.
+
+### v1.3: temperature scaling, and why it's not a clean win
+
+v1.2's shots blend compressed ratings toward the middle, which helped the
+aggregate scores but left the confidence figure wrong at the extremes:
+over-confident just below a coin flip, under-confident at the top —
+`0.7–0.8` said 74.2% and delivered 80.4%, `0.8–0.9` said 83.8% and delivered
+90.1%. That shape — errors growing symmetrically with distance from 1/3 — is
+exactly what temperature scaling exists to fix: a single scalar `T` applied to
+the final probabilities (`prescore/model/calibration.py`), `T < 1` sharpening
+them, `T > 1` flattening them.
+
+`T` is deliberately never fit inside `poisson.fit()` alongside `home_advantage`
+or `rho`: those describe the data-generating process and are correctly fit
+in-sample, but calibration is fundamentally an out-of-sample question — fitting
+it on the same predictions the ratings were trained on would be circular. It
+is fit once, externally, against the walk-forward backtest's held-out
+predictions, then carried as a plain chosen hyperparameter, same lifecycle as
+`xg_weight`.
+
+**Validated on the standard 3,061-prediction backtest, split at its midpoint
+date to check the direction is stable, not just the magnitude:**
+
+| fit on | tested on | fitted T | log loss change | RPS change |
+|---|---|---:|---:|---:|
+| earlier half | later half | 0.8822 | −0.0000 | −0.0002 |
+| later half | earlier half | 0.9375 | −0.0012 | −0.0003 |
+
+Both directions land below 1.0 (sharpening) — a consistent sign, unlike the
+ELO and injury-weight experiments, which flipped sign between windows and were
+rejected for it. `0.9078`, the value fit on the full set, is what shipped.
+
+**Read the aggregate numbers honestly: they barely move.** Both RPS changes
+are inside this project's own established noise floor (the hyperparameter
+sweep alone spans 0.003). What actually changes is the calibration table:
+
+| bucket | before | after |
+|---|---:|---:|
+| 0.6–0.7 | +0.029 | +0.014 |
+| 0.7–0.8 | +0.062 | +0.026 |
+| 0.8–0.9 | +0.064 | +0.024 |
+| 0.5–0.6 | +0.012 | **−0.019** |
+
+More than half the top-end gap closes — but a single global temperature can't
+fix a non-uniform miscalibration without redistributing some of it elsewhere,
+and the 0.5–0.6 band picks up a smaller, new problem in the process. This
+shipped anyway, by explicit decision, as a targeted fix for the one named flaw
+rather than a claim that the model is now better calibrated everywhere.
 
 ---
 

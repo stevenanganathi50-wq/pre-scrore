@@ -26,6 +26,7 @@ from datetime import date
 from typing import Iterable, Protocol, Sequence
 
 from .. import config
+from . import calibration
 
 _MAX_LOG_GOALS = 2.5  # exp(2.5) ~ 12 goals; a hard cap purely for stability
 _RHO_BOUND = 0.25
@@ -90,6 +91,12 @@ class PoissonDixonColes:
     # side. Zero unless `fit()` was called with `fit_injury_weight=True` --
     # see the module docstring note on why that defaults off.
     injury_weight: float = 0.0
+    # Post-hoc calibration applied to the final H/D/A probabilities. Unlike
+    # every other parameter here, this is never fit inside `fit()` -- see
+    # prescore/model/calibration.py for why. Defaults to the externally-fit
+    # production value, same lifecycle as xg_weight; pass temperature=1.0
+    # explicitly for the uncalibrated identity.
+    temperature: float = config.CALIBRATION_TEMPERATURE
     version: str = field(default=config.MODEL_VERSION)
 
     # -- prediction -------------------------------------------------------
@@ -171,6 +178,9 @@ class PoissonDixonColes:
                     p_draw += cell
                 else:
                     p_away += cell
+        p_home, p_draw, p_away = calibration.apply_temperature(
+            (p_home, p_draw, p_away), self.temperature
+        )
         lam, mu = self.expected_goals(home, away, home_injuries, away_injuries)
         return Outcome(p_home, p_draw, p_away, lam, mu)
 
@@ -188,6 +198,7 @@ class PoissonDixonColes:
             "base": self.base,
             "home_advantage": self.home_advantage,
             "injury_weight": self.injury_weight,
+            "temperature": self.temperature,
             "rho": self.rho,
             "half_life_days": self.half_life_days,
             "ridge": self.ridge,
@@ -481,6 +492,8 @@ def fit(
     season_break_days: float = config.SEASON_BREAK_DAYS,
     xg_weight: float = config.XG_WEIGHT,
     fit_injury_weight: bool = False,
+    # A pure passthrough, never fit here -- see calibration.py for why.
+    temperature: float = config.CALIBRATION_TEMPERATURE,
 ) -> PoissonDixonColes:
     """Fit ratings by weighted maximum likelihood.
 
@@ -630,4 +643,5 @@ def fit(
         xg_weight=xg_weight,
         sot_conversion=conversion,
         injury_weight=injury_weight,
+        temperature=temperature,
     )

@@ -36,7 +36,12 @@ SCHEMA_PATH = ROOT / "db" / "schema.sql"
 #        below league average rather than at it
 #   1.2  ratings fit to a 50/50 blend of goals and a shots-on-target proxy,
 #        which filters out some finishing luck
-MODEL_VERSION = "poisson-dc-1.2"
+#   1.3  post-hoc temperature scaling corrects v1.2's under-confidence at the
+#        top of the range (see CALIBRATION_TEMPERATURE). Shipped ahead of the
+#        model freeze's normal ~100-live-prediction threshold, by explicit
+#        decision -- backtest-validated only, not yet checked against live
+#        results the way every prior version was.
+MODEL_VERSION = "poisson-dc-1.3"
 
 
 @dataclass(frozen=True)
@@ -140,6 +145,31 @@ SEASON_BREAK_DAYS = 0.0
 # Pure shots (1.0) is worse than pure goals (0.2017 vs 0.2009) -- finishing is
 # a genuine skill, and shots on target throw it away. The blend keeps both.
 XG_WEIGHT = 0.5
+
+# Post-hoc temperature scaling on the final H/D/A probabilities (see
+# prescore/model/calibration.py). Corrects v1.2's known top-end
+# under-confidence: it said 74% and delivered 80%.
+#
+# Fit on the standard 3,061-prediction out-of-sample backtest set, split at
+# its midpoint date to check the fit generalises: 0.8822 fit on the earlier
+# half and evaluated on the later one, 0.9375 the reverse -- same direction
+# both times (sharpening), unlike the ELO and injury-weight experiments,
+# which flipped sign between windows and were rejected for it. 0.9078 is the
+# value fit on the full set.
+#
+# Read this as a real but modest, imperfect fix, not a clean win like
+# XG_WEIGHT: aggregate RPS/log loss barely move (-0.0002 to -0.0003, within
+# this project's established noise floor), and while it closes more than
+# half the gap at the top of the range (0.8-0.9 gap: +0.064 -> +0.024), it
+# introduces a smaller new one around the middle (0.5-0.6 gap: +0.012 ->
+# -0.019). A single global temperature cannot fix a non-uniform miscalibration
+# without redistributing some of it elsewhere.
+#
+# Shipped by explicit decision ahead of the model freeze's normal
+# ~100-live-prediction threshold -- see MODEL_VERSION history and the README.
+# Every other version bump here was checked against live results before
+# shipping; this one has not been yet.
+CALIBRATION_TEMPERATURE = 0.9078
 
 # A model needs a reasonable history before its output means anything.
 MIN_TRAINING_MATCHES = 200
