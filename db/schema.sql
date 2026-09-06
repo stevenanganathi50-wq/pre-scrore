@@ -138,12 +138,19 @@ END;
 
 -- Kickoff cannot be moved once a prediction exists for that match, or
 -- guarantee 1 could be rewritten after the fact.
+-- Checks both predictions and market_predictions: a v2-market row can exist
+-- for a match with no CURRENT-version 1X2 row yet (the backfill case, where
+-- 1X2 was published under an older model version) so checking only one
+-- table would not be a watertight guarantee.
 DROP TRIGGER IF EXISTS matches_protect_kickoff;
 CREATE TRIGGER matches_protect_kickoff
 BEFORE UPDATE OF kickoff_utc ON matches
 WHEN OLD.kickoff_utc IS NOT NULL
  AND NEW.kickoff_utc IS NOT OLD.kickoff_utc
- AND EXISTS (SELECT 1 FROM predictions WHERE match_id = OLD.id)
+ AND (
+   EXISTS (SELECT 1 FROM predictions WHERE match_id = OLD.id)
+   OR EXISTS (SELECT 1 FROM market_predictions WHERE match_id = OLD.id)
+ )
 BEGIN
     SELECT RAISE(ABORT, 'cannot move kickoff after predictions were published');
 END;
@@ -157,6 +164,74 @@ CREATE TABLE IF NOT EXISTS prediction_results (
     rps            REAL NOT NULL,
     brier          REAL NOT NULL,
     graded_at      TEXT NOT NULL
+);
+
+-- v2 markets (BTTS, Over/Under, ...): a genuinely generic table, not a reuse
+-- of `predictions`' p_home/p_draw/p_away columns, which are specifically
+-- shaped for 1X2's three named outcomes. BTTS is Yes/No, Over/Under is
+-- Over/Under -- neither fits that shape honestly, and future markets
+-- (correct score has many outcomes) need arbitrary outcome counts anyway.
+-- One row per possible outcome per market per fixture.
+--
+-- Derived purely from the scoreline matrix an already-fitted, already-frozen
+-- model produces for 1X2 -- see prescore/model/markets.py. No new fitting, no
+-- change to what 1X2 predicts, so this does not touch the existing track
+-- record and is not another exception to the model freeze.
+CREATE TABLE IF NOT EXISTS market_predictions (
+    id             INTEGER PRIMARY KEY,
+    match_id       INTEGER NOT NULL REFERENCES matches(id),
+    model_version  TEXT NOT NULL,
+    market         TEXT NOT NULL,       -- 'BTTS', 'OU2.5'
+    outcome        TEXT NOT NULL,       -- 'Yes'/'No', 'Over'/'Under'
+    probability    REAL NOT NULL,
+    is_pick        INTEGER NOT NULL CHECK (is_pick IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    UNIQUE (match_id, model_version, market, outcome)
+);
+
+-- The same immutability guarantees as `predictions`, applied to this table.
+DROP TRIGGER IF EXISTS market_predictions_before_kickoff;
+CREATE TRIGGER market_predictions_before_kickoff
+BEFORE INSERT ON market_predictions
+BEGIN
+    SELECT CASE
+        WHEN (SELECT kickoff_utc FROM matches WHERE id = NEW.match_id) IS NULL
+        THEN RAISE(ABORT, 'match has no kickoff time, so a prediction cannot be verified as pre-kickoff')
+        WHEN NEW.created_at >= (
+            SELECT kickoff_utc FROM matches WHERE id = NEW.match_id
+        )
+        THEN RAISE(ABORT, 'prediction would be recorded at or after kickoff')
+    END;
+END;
+
+DROP TRIGGER IF EXISTS market_predictions_no_update;
+CREATE TRIGGER market_predictions_no_update
+BEFORE UPDATE ON market_predictions
+BEGIN
+    SELECT RAISE(ABORT, 'predictions are immutable once published');
+END;
+
+DROP TRIGGER IF EXISTS market_predictions_no_delete;
+CREATE TRIGGER market_predictions_no_delete
+BEFORE DELETE ON market_predictions
+BEGIN
+    SELECT RAISE(ABORT, 'predictions are immutable once published');
+END;
+
+-- log_loss and brier generalise cleanly to any number of outcomes; RPS does
+-- not -- it depends on a natural ordering (1X2's H < D < A), which a 2-way
+-- market like BTTS or Over/Under doesn't have anything meaningful to add
+-- beyond what Brier already captures. So RPS is 1X2-only, not carried here.
+CREATE TABLE IF NOT EXISTS market_prediction_results (
+    match_id       INTEGER NOT NULL REFERENCES matches(id),
+    model_version  TEXT NOT NULL,
+    market         TEXT NOT NULL,
+    actual_outcome TEXT NOT NULL,
+    is_hit         INTEGER NOT NULL CHECK (is_hit IN (0, 1)),
+    log_loss       REAL NOT NULL,
+    brier          REAL NOT NULL,
+    graded_at      TEXT NOT NULL,
+    PRIMARY KEY (match_id, model_version, market)
 );
 
 -- --- Backtesting ---------------------------------------------------------

@@ -504,6 +504,142 @@ def injury_counts(conn: sqlite3.Connection, league: str) -> dict[str, int]:
     return {int(r["season"]): int(r["n"]) for r in rows}
 
 
+# --- v2 markets (BTTS, Over/Under): a genuinely generic table, not a reuse of
+# predictions' p_home/p_draw/p_away columns -- see db/schema.sql. One row per
+# possible outcome per market per fixture, so a "prediction" here is really a
+# small set of rows sharing (match_id, model_version, market).
+
+def has_market_prediction(
+    conn: sqlite3.Connection, match_id: int, model_version: str, market: str
+) -> bool:
+    row = conn.execute(
+        """SELECT 1 FROM market_predictions
+           WHERE match_id = ? AND model_version = ? AND market = ? LIMIT 1""",
+        (match_id, model_version, market),
+    ).fetchone()
+    return row is not None
+
+
+def insert_market_prediction(
+    conn: sqlite3.Connection,
+    *,
+    match_id: int,
+    model_version: str,
+    market: str,
+    probabilities: dict[str, float],
+    pick: str,
+    created_at: str,
+) -> None:
+    for outcome, p in probabilities.items():
+        conn.execute(
+            """
+            INSERT INTO market_predictions (
+                match_id, model_version, market, outcome, probability,
+                is_pick, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (match_id, model_version, market, outcome, p,
+             1 if outcome == pick else 0, created_at),
+        )
+
+
+def ungraded_market_predictions(
+    conn: sqlite3.Connection, league: str, market: str
+) -> list[dict]:
+    """Published market predictions whose match has finished but has no result
+    yet. Grouped back up from one-row-per-outcome into one entry per fixture,
+    since grading needs the whole probability set plus the pick together."""
+    rows = conn.execute(
+        """
+        SELECT mp.match_id, mp.model_version, mp.outcome, mp.probability,
+               mp.is_pick, m.home_goals, m.away_goals
+        FROM market_predictions mp
+        JOIN matches m ON m.id = mp.match_id
+        LEFT JOIN market_prediction_results r
+          ON r.match_id = mp.match_id AND r.model_version = mp.model_version
+         AND r.market = mp.market
+        WHERE m.league = ? AND mp.market = ? AND m.status = 'finished'
+          AND m.home_goals IS NOT NULL AND r.match_id IS NULL
+        ORDER BY m.kickoff_utc
+        """,
+        (league, market),
+    ).fetchall()
+
+    grouped: dict[tuple, dict] = {}
+    for r in rows:
+        key = (r["match_id"], r["model_version"])
+        entry = grouped.setdefault(
+            key,
+            {
+                "match_id": r["match_id"],
+                "model_version": r["model_version"],
+                "home_goals": r["home_goals"],
+                "away_goals": r["away_goals"],
+                "probabilities": {},
+                "pick": None,
+            },
+        )
+        entry["probabilities"][r["outcome"]] = r["probability"]
+        if r["is_pick"]:
+            entry["pick"] = r["outcome"]
+    return list(grouped.values())
+
+
+def insert_market_result(
+    conn: sqlite3.Connection,
+    *,
+    match_id: int,
+    model_version: str,
+    market: str,
+    actual_outcome: str,
+    is_hit: bool,
+    log_loss: float,
+    brier: float,
+    graded_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO market_prediction_results (
+            match_id, model_version, market, actual_outcome, is_hit,
+            log_loss, brier, graded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (match_id, model_version, market, actual_outcome, int(is_hit),
+         log_loss, brier, graded_at),
+    )
+
+
+def market_accuracy(
+    conn: sqlite3.Connection, league: str, market: str, model_version: str
+) -> dict:
+    """Headline accuracy for one v2 market, scoped to one model version --
+    same reasoning as 1X2's `publish.accuracy`: averaging predictors together
+    would misrepresent both."""
+    row = conn.execute(
+        """
+        SELECT count(*) AS n,
+               sum(r.is_hit) AS hits,
+               avg(r.log_loss) AS log_loss,
+               avg(r.brier) AS brier
+        FROM market_prediction_results r
+        JOIN matches m ON m.id = r.match_id
+        WHERE m.league = ? AND r.market = ? AND r.model_version = ?
+        """,
+        (league, market, model_version),
+    ).fetchone()
+    n = int(row["n"] or 0)
+    hits = int(row["hits"] or 0)
+    return {
+        "market": market,
+        "model_version": model_version,
+        "n": n,
+        "hits": hits,
+        "accuracy": hits / n if n else 0.0,
+        "log_loss": row["log_loss"] if n else 0.0,
+        "brier": row["brier"] if n else 0.0,
+    }
+
+
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     out = {}
     for table in ("teams", "matches", "predictions", "backtest_runs"):

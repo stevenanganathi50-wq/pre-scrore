@@ -175,6 +175,26 @@ class TestImmutabilityGuarantees(PipelineTestCase):
                 (self.later, match_id),
             )
 
+    def test_kickoff_cannot_move_once_a_market_prediction_exists(self):
+        """A v2-market row can exist with zero 1X2 rows for the same match
+        (the backfill case: 1X2 published under an older model version).
+        Checking only `predictions` would leave a real gap here."""
+        match_id = add_fixture(self.conn, "Alpha", "Bravo", self.soon)
+        store.insert_market_prediction(
+            self.conn, match_id=match_id, model_version="test", market="BTTS",
+            probabilities={"Yes": 0.6, "No": 0.4}, pick="Yes",
+            created_at=clock.now_iso(),
+        )
+        n = self.conn.execute(
+            "SELECT count(*) AS n FROM predictions WHERE match_id = ?", (match_id,)
+        ).fetchone()["n"]
+        self.assertEqual(n, 0, "test needs zero 1X2 rows to prove market_predictions alone locks it")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE matches SET kickoff_utc = ? WHERE id = ?",
+                (self.later, match_id),
+            )
+
     def test_kickoff_can_move_before_any_prediction(self):
         match_id = add_fixture(self.conn, "Alpha", "Bravo", self.soon)
         self.conn.execute(
@@ -301,6 +321,155 @@ class TestGrade(PipelineTestCase):
         self.assertEqual(summary["overall"]["hits"], expected_hits)
         self.assertLess(expected_hits, 3, "test needs at least one miss to be meaningful")
         self.assertAlmostEqual(summary["overall"]["accuracy"], expected_hits / 3)
+
+
+class TestV2Markets(PipelineTestCase):
+    """BTTS and OU2.5, published alongside 1X2 from the same fitted model.
+    These must never touch the 1X2 prediction for any fixture -- the whole
+    point of doing this as a v2 market rather than a model change."""
+
+    def test_publishing_writes_market_rows_too(self):
+        add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        result = publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        self.assertEqual(result["markets_written"], 2)  # BTTS + OU2.5
+
+        rows = self.conn.execute(
+            "SELECT market, outcome, probability, is_pick FROM market_predictions"
+        ).fetchall()
+        markets_seen = {r["market"] for r in rows}
+        self.assertEqual(markets_seen, {"BTTS", "OU2.5"})
+        # each market is exactly 2 outcome rows, one of them the pick
+        for market in ("BTTS", "OU2.5"):
+            outcomes = [r for r in rows if r["market"] == market]
+            self.assertEqual(len(outcomes), 2)
+            self.assertEqual(sum(r["is_pick"] for r in outcomes), 1)
+            self.assertAlmostEqual(sum(r["probability"] for r in outcomes), 1.0, places=6)
+
+    def test_does_not_change_the_1x2_prediction(self):
+        """Adding market rows must be invisible to the existing 1X2 path."""
+        add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        without_markets = self.conn.execute(
+            "SELECT count(*) AS n FROM predictions"
+        ).fetchone()["n"]
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        after = self.conn.execute(
+            "SELECT p_home, p_draw, p_away, pick FROM predictions"
+        ).fetchone()
+        self.assertIsNotNone(after)
+        # sanity: still a valid 1X2 row, untouched by the market logic added
+        self.assertAlmostEqual(
+            after["p_home"] + after["p_draw"] + after["p_away"], 1.0, places=6
+        )
+
+    def test_market_predictions_are_immutable(self):
+        add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        row = self.conn.execute(
+            "SELECT id FROM market_predictions LIMIT 1"
+        ).fetchone()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE market_predictions SET probability = 0.5 WHERE id = ?",
+                (row["id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "DELETE FROM market_predictions WHERE id = ?", (row["id"],)
+            )
+
+    def test_market_prediction_rejected_after_kickoff(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.past)
+        with self.assertRaises(sqlite3.IntegrityError):
+            store.insert_market_prediction(
+                self.conn, match_id=match_id, model_version="test", market="BTTS",
+                probabilities={"Yes": 0.6, "No": 0.4}, pick="Yes",
+                created_at=clock.now_iso(),
+            )
+
+    def test_republishing_does_not_duplicate_market_rows(self):
+        add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        first_count = self.conn.execute(
+            "SELECT count(*) AS n FROM market_predictions"
+        ).fetchone()["n"]
+        result = publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        second_count = self.conn.execute(
+            "SELECT count(*) AS n FROM market_predictions"
+        ).fetchone()["n"]
+        self.assertEqual(result["markets_written"], 0)
+        self.assertEqual(first_count, second_count)
+
+    def test_backfills_markets_onto_a_fixture_published_before_v2_existed(self):
+        """A fixture whose 1X2 prediction predates v2 markets must still get
+        BTTS/OU2.5 on the next publish, not be skipped whole."""
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        model_version = "poisson-dc-1.0"  # simulate an old, pre-v2 prediction
+        store.insert_prediction(
+            self.conn, match_id=match_id, model_version=model_version,
+            probs=(0.6, 0.25, 0.15), pick="H", confidence=0.6,
+            created_at=clock.now_iso(),
+        )
+        # publish() uses the CURRENT model version, so this fixture has no
+        # v2 rows under the current version yet, but does have 1X2
+        result = publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        self.assertEqual(result["markets_written"], 2)
+
+    def test_grading_computes_btts_from_the_real_score(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 2, 1)  # both scored -> BTTS Yes
+        publish.grade(self.conn, log=lambda *a: None)
+
+        row = self.conn.execute(
+            "SELECT actual_outcome, is_hit FROM market_prediction_results "
+            "WHERE match_id = ? AND market = 'BTTS'", (match_id,),
+        ).fetchone()
+        self.assertEqual(row["actual_outcome"], "Yes")
+
+    def test_grading_computes_btts_no_when_a_side_is_shut_out(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 3, 0)
+        publish.grade(self.conn, log=lambda *a: None)
+
+        row = self.conn.execute(
+            "SELECT actual_outcome FROM market_prediction_results "
+            "WHERE match_id = ? AND market = 'BTTS'", (match_id,),
+        ).fetchone()
+        self.assertEqual(row["actual_outcome"], "No")
+
+    def test_grading_computes_over_under_from_the_total(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 2, 2)  # total 4 -> over 2.5
+        publish.grade(self.conn, log=lambda *a: None)
+
+        row = self.conn.execute(
+            "SELECT actual_outcome FROM market_prediction_results "
+            "WHERE match_id = ? AND market = 'OU2.5'", (match_id,),
+        ).fetchone()
+        self.assertEqual(row["actual_outcome"], "Over")
+
+    def test_grading_market_predictions_is_idempotent(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 1, 1)
+        first = publish.grade(self.conn, log=lambda *a: None)
+        second = publish.grade(self.conn, log=lambda *a: None)
+        self.assertEqual(first["markets_graded"], 2)
+        self.assertEqual(second["markets_graded"], 0)
+
+    def test_market_accuracy_is_scoped_to_one_model_version(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 2, 1)
+        publish.grade(self.conn, log=lambda *a: None)
+
+        summary = publish.market_accuracy(self.conn)
+        self.assertIn("BTTS", summary)
+        self.assertIn("OU2.5", summary)
+        self.assertEqual(summary["BTTS"]["n"], 1)
+        self.assertEqual(summary["BTTS"]["model_version"], config.MODEL_VERSION)
 
 
 class TestExport(PipelineTestCase):

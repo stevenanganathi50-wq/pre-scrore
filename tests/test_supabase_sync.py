@@ -32,6 +32,10 @@ class FakeClient:
             return (row["league"], row["season"], row["home_team_id"], row["away_team_id"])
         if table == "predictions":
             return (row["match_id"], row["model_version"], row["market"])
+        if table == "market_predictions":
+            return (row["match_id"], row["model_version"], row["market"], row["outcome"])
+        if table == "market_prediction_results":
+            return (row["match_id"], row["model_version"], row["market"])
         return (row.get("prediction_id"),)
 
     def request(self, method, table, *, body=None, params=None, prefer=None):
@@ -91,6 +95,12 @@ class SyncTestCase(unittest.TestCase):
             self.conn, self.client, team_ids, "EPL", log=lambda *a: None
         )
         pred_ids = supabase_sync.push_predictions(
+            self.conn, self.client, team_ids, match_ids, "EPL", log=lambda *a: None
+        )
+        supabase_sync.push_market_predictions(
+            self.conn, self.client, team_ids, match_ids, "EPL", log=lambda *a: None
+        )
+        supabase_sync.push_market_results(
             self.conn, self.client, team_ids, match_ids, "EPL", log=lambda *a: None
         )
         return team_ids, match_ids, pred_ids
@@ -168,6 +178,123 @@ class TestPush(SyncTestCase):
         without = [r for r in self.client.tables["matches"] if r["kickoff_utc"] is None]
         self.assertTrue(without)
         self.assertTrue(all(r["status"] == "finished" for r in without))
+
+
+class TestMarketSync(SyncTestCase):
+    """v2 markets get their own push/pull path (see push_market_predictions,
+    push_market_results in supabase_sync.py) since market_prediction_results
+    keys on (match_id, model_version, market) rather than a generated id --
+    a market prediction is several outcome rows, not one, so there's no
+    single row id to remap the way push_results remaps prediction_id."""
+
+    def test_push_writes_remapped_match_ids(self):
+        team_ids, match_ids, _ = self.run_push()
+        rows = self.client.tables.get("market_predictions", [])
+        self.assertTrue(rows)
+        valid_match_ids = set(match_ids.values())
+        for row in rows:
+            self.assertIn(row["match_id"], valid_match_ids)
+
+    def test_push_sends_both_markets_for_every_fixture(self):
+        self.run_push()
+        rows = self.client.tables.get("market_predictions", [])
+        markets_seen = {r["market"] for r in rows}
+        self.assertEqual(markets_seen, {"BTTS", "OU2.5"})
+        # 2 fixtures x 2 markets x 2 outcomes each = 8
+        self.assertEqual(len(rows), 8)
+
+    def test_push_is_idempotent(self):
+        self.run_push()
+        before = len(self.client.tables.get("market_predictions", []))
+        self.run_push()
+        after = len(self.client.tables.get("market_predictions", []))
+        self.assertEqual(before, after)
+
+    def test_local_ids_are_never_sent(self):
+        self.run_push()
+        for table, row in self.client.sent:
+            if table in ("market_predictions", "market_prediction_results"):
+                self.assertNotIn("id", row)
+
+    def test_results_round_trip_after_grading(self):
+        finish_match(self.conn, self.match_id, 2, 1)
+        publish.grade(self.conn, log=lambda *a: None)
+        self.run_push()
+
+        rows = self.client.tables.get("market_prediction_results", [])
+        by_market = {r["market"]: r for r in rows if r["match_id"] is not None}
+        self.assertIn("BTTS", by_market)
+        self.assertEqual(by_market["BTTS"]["actual_outcome"], "Yes")  # 2-1: both scored
+        self.assertIn("OU2.5", by_market)
+        self.assertEqual(by_market["OU2.5"]["actual_outcome"], "Over")  # total 3
+
+    def test_wipe_and_pull_reproduces_market_predictions_exactly(self):
+        """Same guarantee already proven for 1X2: a runner with no durable
+        storage must reconstruct the exact published record, not a fresh
+        (and differently-timestamped) recomputation of it."""
+        before = {
+            (r["match_id"], r["market"], r["outcome"]): r["probability"]
+            for r in self.conn.execute(
+                "SELECT match_id, market, outcome, probability FROM market_predictions"
+            ).fetchall()
+        }
+        self.run_push()
+
+        self.conn.execute("DROP TRIGGER IF EXISTS market_predictions_no_delete")
+        self.conn.execute("DELETE FROM market_predictions")
+        self.conn.commit()
+        store.init_schema(self.conn)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT count(*) AS n FROM market_predictions"
+            ).fetchone()["n"],
+            0,
+        )
+
+        # pull_all() builds its own real Client from env settings, which these
+        # offline tests deliberately avoid (same constraint TestPull works
+        # around) -- so the pull logic is replicated here directly against
+        # the fake client, mirroring exactly what pull_all's market section does.
+        remote_teams = {int(r["id"]): r["name"] for r in self.client.select("teams", {})}
+        remote_matches = self.client.select("matches", {})
+        match_key = {}
+        for r in remote_matches:
+            home = remote_teams.get(r["home_team_id"])
+            away = remote_teams.get(r["away_team_id"])
+            if home and away:
+                match_key[r["id"]] = (r["season"], home, away)
+        local_matches = store.match_ids_by_key(self.conn, "EPL")
+
+        for row in self.client.select("market_predictions", {}):
+            key = match_key.get(row["match_id"])
+            local_match = local_matches.get(key) if key else None
+            if local_match is None:
+                continue
+            self.conn.execute(
+                """INSERT INTO market_predictions (
+                       match_id, model_version, market, outcome, probability,
+                       is_pick, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (local_match, row["model_version"], row["market"], row["outcome"],
+                 row["probability"], int(row["is_pick"]), row["created_at"]),
+            )
+        self.conn.commit()
+
+        after = {
+            (r["match_id"], r["market"], r["outcome"]): r["probability"]
+            for r in self.conn.execute(
+                "SELECT match_id, market, outcome, probability FROM market_predictions"
+            ).fetchall()
+        }
+        self.assertEqual(set(before), set(after))
+        for key, p in before.items():
+            self.assertAlmostEqual(after[key], p, places=12)
+
+    def test_reconcile_catches_a_dropped_market_prediction(self):
+        self.run_push()
+        self.client.tables["market_predictions"] = []
+        problems = supabase_sync.reconcile(self.conn, self.client, "EPL")
+        self.assertTrue(any("market_predictions" in p for p in problems))
 
 
 class TestPagination(unittest.TestCase):

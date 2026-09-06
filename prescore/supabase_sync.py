@@ -379,6 +379,112 @@ def push_results(
     return len(payload)
 
 
+def push_market_predictions(
+    conn: sqlite3.Connection,
+    client: Client,
+    team_ids: dict[str, int],
+    match_ids: dict[tuple, int],
+    league: str,
+    log=print,
+) -> int:
+    """v2 markets (BTTS, OU2.5). Unlike push_predictions, no id-remapping is
+    needed afterward: market_prediction_results keys on
+    (match_id, model_version, market) directly, not a generated row id, since
+    a market prediction is several outcome rows rather than one."""
+    rows = conn.execute(
+        """
+        SELECT mp.model_version, mp.market, mp.outcome, mp.probability,
+               mp.is_pick, mp.created_at,
+               m.league, m.season, h.name AS home, a.name AS away
+        FROM market_predictions mp
+        JOIN matches m ON m.id = mp.match_id
+        JOIN teams h ON h.id = m.home_team_id
+        JOIN teams a ON a.id = m.away_team_id
+        WHERE m.league = ?
+        ORDER BY mp.id
+        """,
+        (league,),
+    ).fetchall()
+
+    payload = []
+    for r in rows:
+        key = (r["league"], r["season"], team_ids.get(r["home"]), team_ids.get(r["away"]))
+        remote_match = match_ids.get(key)
+        if remote_match is None:
+            continue
+        payload.append(
+            {
+                "match_id": remote_match,
+                "model_version": r["model_version"],
+                "market": r["market"],
+                "outcome": r["outcome"],
+                "probability": r["probability"],
+                "is_pick": bool(r["is_pick"]),
+                "created_at": r["created_at"],
+            }
+        )
+
+    for batch in _chunks(payload):
+        client.request(
+            "POST",
+            "market_predictions",
+            body=batch,
+            params={"on_conflict": "match_id,model_version,market,outcome"},
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
+    log(f"  market_predictions  {len(payload)} sent")
+    return len(payload)
+
+
+def push_market_results(
+    conn: sqlite3.Connection,
+    client: Client,
+    team_ids: dict[str, int],
+    match_ids: dict[tuple, int],
+    league: str,
+    log=print,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT r.model_version, r.market, r.actual_outcome, r.is_hit,
+               r.log_loss, r.brier, r.graded_at,
+               m.league, m.season, h.name AS home, a.name AS away
+        FROM market_prediction_results r
+        JOIN matches m ON m.id = r.match_id
+        JOIN teams h ON h.id = m.home_team_id
+        JOIN teams a ON a.id = m.away_team_id
+        WHERE m.league = ?
+        """,
+        (league,),
+    ).fetchall()
+
+    payload = []
+    for r in rows:
+        key = (r["league"], r["season"], team_ids.get(r["home"]), team_ids.get(r["away"]))
+        remote_match = match_ids.get(key)
+        if remote_match is None:
+            continue
+        payload.append(
+            {
+                "match_id": remote_match,
+                "model_version": r["model_version"],
+                "market": r["market"],
+                "actual_outcome": r["actual_outcome"],
+                "is_hit": bool(r["is_hit"]),
+                "log_loss": r["log_loss"],
+                "brier": r["brier"],
+                "graded_at": r["graded_at"],
+            }
+        )
+
+    client.upsert(
+        "market_prediction_results", payload,
+        on_conflict="match_id,model_version,market", returning=False,
+    )
+    log(f"  market_prediction_results  {len(payload)} sent")
+    return len(payload)
+
+
 def pull_all(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
     """Hydrate the local database with the published record from Supabase.
 
@@ -486,11 +592,79 @@ def pull_all(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
     conn.commit()
     log(f"  results      {graded} pulled")
 
+    market_predictions_pulled = 0
+    market_rows = client.select(
+        "market_predictions",
+        {"select": "match_id,model_version,market,outcome,probability,is_pick,created_at"},
+    )
+    for row in market_rows:
+        key = match_key.get(int(row["match_id"]))
+        local_match = local_matches.get(key) if key else None
+        if local_match is None:
+            continue
+        # A row-per-outcome table has no single "does this exist" check the
+        # way has_prediction does; probing one outcome is enough since all of
+        # a market's outcome rows are written in the same publish() call.
+        existing = conn.execute(
+            """SELECT 1 FROM market_predictions
+               WHERE match_id = ? AND model_version = ? AND market = ? AND outcome = ?""",
+            (local_match, row["model_version"], row["market"], row["outcome"]),
+        ).fetchone()
+        if existing is not None:
+            continue
+        try:
+            conn.execute(
+                """INSERT INTO market_predictions (
+                       match_id, model_version, market, outcome, probability,
+                       is_pick, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (local_match, row["model_version"], row["market"], row["outcome"],
+                 row["probability"], int(row["is_pick"]), clock.normalize(row["created_at"])),
+            )
+        except sqlite3.IntegrityError as exc:
+            log(f"    market_predictions refused by local constraints: {exc}")
+            continue
+        market_predictions_pulled += 1
+    conn.commit()
+    log(f"  market_predictions  {market_predictions_pulled} pulled")
+
+    market_results_pulled = 0
+    market_result_rows = client.select(
+        "market_prediction_results",
+        {"select": "match_id,model_version,market,actual_outcome,is_hit,log_loss,brier,graded_at"},
+    )
+    for row in market_result_rows:
+        key = match_key.get(int(row["match_id"]))
+        local_match = local_matches.get(key) if key else None
+        if local_match is None:
+            continue
+        existing = conn.execute(
+            """SELECT 1 FROM market_prediction_results
+               WHERE match_id = ? AND model_version = ? AND market = ?""",
+            (local_match, row["model_version"], row["market"]),
+        ).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            """INSERT INTO market_prediction_results (
+                   match_id, model_version, market, actual_outcome, is_hit,
+                   log_loss, brier, graded_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (local_match, row["model_version"], row["market"], row["actual_outcome"],
+             int(row["is_hit"]), row["log_loss"], row["brier"],
+             clock.normalize(row["graded_at"])),
+        )
+        market_results_pulled += 1
+    conn.commit()
+    log(f"  market_prediction_results  {market_results_pulled} pulled")
+
     return {
         "predictions": inserted,
         "already_local": skipped,
         "unmatched": unmatched,
         "results": graded,
+        "market_predictions": market_predictions_pulled,
+        "market_results": market_results_pulled,
     }
 
 
@@ -517,6 +691,16 @@ def reconcile(conn: sqlite3.Connection, client: Client, league: str) -> list[str
                JOIN matches m ON m.id = p.match_id WHERE m.league = ?""",
             (league,),
         ).fetchone()["n"],
+        "market_predictions": conn.execute(
+            """SELECT count(*) AS n FROM market_predictions mp
+               JOIN matches m ON m.id = mp.match_id WHERE m.league = ?""",
+            (league,),
+        ).fetchone()["n"],
+        "market_prediction_results": conn.execute(
+            """SELECT count(*) AS n FROM market_prediction_results r
+               JOIN matches m ON m.id = r.match_id WHERE m.league = ?""",
+            (league,),
+        ).fetchone()["n"],
     }
 
     problems = []
@@ -539,6 +723,8 @@ def push_all(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
     match_ids = push_matches(conn, client, team_ids, league, log=log)
     prediction_ids = push_predictions(conn, client, team_ids, match_ids, league, log=log)
     results = push_results(conn, client, prediction_ids, league, log=log)
+    market_predictions = push_market_predictions(conn, client, team_ids, match_ids, league, log=log)
+    market_results = push_market_results(conn, client, team_ids, match_ids, league, log=log)
 
     problems = reconcile(conn, client, league)
     for problem in problems:
@@ -549,5 +735,7 @@ def push_all(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
         "matches": len(match_ids),
         "predictions": len(prediction_ids),
         "results": results,
+        "market_predictions": market_predictions,
+        "market_results": market_results,
         "problems": problems,
     }

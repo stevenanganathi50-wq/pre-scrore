@@ -16,7 +16,12 @@ from datetime import timedelta
 
 from . import clock, config, store
 from .backtest import metrics
-from .model import poisson
+from .model import markets, poisson
+
+# v2 markets published alongside 1X2, derived from the same fitted model's
+# scoreline matrix -- see prescore/model/markets.py. Adding a market here
+# does not touch the 1X2 prediction for any fixture.
+MARKETS = ("BTTS", "OU2.5")
 
 
 def build_model(
@@ -37,6 +42,43 @@ def build_model(
     )
 
 
+def _publish_market_predictions(
+    conn: sqlite3.Connection,
+    model: poisson.PoissonDixonColes,
+    fixture,
+    matrix,
+    now_iso: str,
+    dry_run: bool,
+) -> list[str]:
+    """Store BTTS/OU2.5 for one fixture, skipping any already published.
+    Returns which markets were actually written (for reporting only)."""
+    written_markets = []
+
+    if not store.has_market_prediction(conn, fixture.id, model.version, "BTTS"):
+        p_yes, p_no = markets.btts_probability(matrix)
+        pick = "Yes" if p_yes >= p_no else "No"
+        if not dry_run:
+            store.insert_market_prediction(
+                conn, match_id=fixture.id, model_version=model.version,
+                market="BTTS", probabilities={"Yes": p_yes, "No": p_no},
+                pick=pick, created_at=now_iso,
+            )
+        written_markets.append("BTTS")
+
+    if not store.has_market_prediction(conn, fixture.id, model.version, "OU2.5"):
+        p_over, p_under = markets.over_under_probability(matrix, line=2.5)
+        pick = "Over" if p_over >= p_under else "Under"
+        if not dry_run:
+            store.insert_market_prediction(
+                conn, match_id=fixture.id, model_version=model.version,
+                market="OU2.5", probabilities={"Over": p_over, "Under": p_under},
+                pick=pick, created_at=now_iso,
+            )
+        written_markets.append("OU2.5")
+
+    return written_markets
+
+
 def publish(
     conn: sqlite3.Connection,
     league: str = "EPL",
@@ -47,7 +89,13 @@ def publish(
     dry_run: bool = False,
     log=print,
 ) -> dict:
-    """Predict every unpublished fixture kicking off within the horizon."""
+    """Predict every unpublished fixture kicking off within the horizon.
+
+    Writes 1X2 first, then BTTS/OU2.5 derived from the same fitted model's
+    scoreline matrix. The two are checked and skipped independently, so a
+    fixture that already has 1X2 (e.g. published before v2 markets existed)
+    still gets its market predictions backfilled rather than skipped whole.
+    """
     now = clock.utc_now()
     now_iso = clock.to_iso(now)
     horizon_iso = clock.to_iso(now + timedelta(days=horizon_days))
@@ -56,42 +104,49 @@ def publish(
     fixtures = store.upcoming_fixtures(conn, league, now_iso, horizon_iso)
 
     written, skipped, no_history = [], 0, set()
+    markets_written = 0
 
     for fixture in fixtures:
-        if store.has_prediction(conn, fixture.id, model.version):
-            skipped += 1
-            continue
+        already_published = store.has_prediction(conn, fixture.id, model.version)
 
-        for team in (fixture.home, fixture.away):
-            if not model.knows(team):
-                no_history.add(team)
+        if not already_published:
+            for team in (fixture.home, fixture.away):
+                if not model.knows(team):
+                    no_history.add(team)
 
-        outcome = model.predict(fixture.home, fixture.away)
-        probs = outcome.as_tuple()
+            outcome = model.predict(fixture.home, fixture.away)
+            probs = outcome.as_tuple()
 
-        if not dry_run:
-            store.insert_prediction(
-                conn,
-                match_id=fixture.id,
-                model_version=model.version,
-                probs=probs,
-                pick=outcome.pick,
-                confidence=outcome.confidence,
-                created_at=now_iso,
+            if not dry_run:
+                store.insert_prediction(
+                    conn,
+                    match_id=fixture.id,
+                    model_version=model.version,
+                    probs=probs,
+                    pick=outcome.pick,
+                    confidence=outcome.confidence,
+                    created_at=now_iso,
+                )
+
+            written.append(
+                {
+                    "match_id": fixture.id,
+                    "kickoff_utc": fixture.kickoff_utc,
+                    "home": fixture.home,
+                    "away": fixture.away,
+                    "p_home": probs[0],
+                    "p_draw": probs[1],
+                    "p_away": probs[2],
+                    "pick": outcome.pick,
+                    "confidence": outcome.confidence,
+                }
             )
+        else:
+            skipped += 1
 
-        written.append(
-            {
-                "match_id": fixture.id,
-                "kickoff_utc": fixture.kickoff_utc,
-                "home": fixture.home,
-                "away": fixture.away,
-                "p_home": probs[0],
-                "p_draw": probs[1],
-                "p_away": probs[2],
-                "pick": outcome.pick,
-                "confidence": outcome.confidence,
-            }
+        matrix = model.score_matrix(fixture.home, fixture.away)
+        markets_written += len(
+            _publish_market_predictions(conn, model, fixture, matrix, now_iso, dry_run)
         )
 
     if not dry_run:
@@ -114,18 +169,27 @@ def publish(
             " These remain\n  weaker predictions than ones between known teams."
         )
 
+    if markets_written:
+        log(f"\n  also published {markets_written} v2 market predictions (BTTS, OU2.5)")
+
     return {
         "model_version": model.version,
         "published_at": now_iso,
         "written": len(written),
         "skipped_already_published": skipped,
+        "markets_written": markets_written,
         "fixtures": written,
         "teams_without_history": sorted(no_history),
     }
 
 
 def grade(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
-    """Score every published prediction whose match has now finished."""
+    """Score every published prediction whose match has now finished.
+
+    Grades 1X2 first, then each v2 market independently -- a fixture graded
+    for 1X2 always gets its BTTS/OU2.5 results at the same time, since both
+    only need the match to have finished, nothing else.
+    """
     graded_at = clock.now_iso()
     pending = store.ungraded_predictions(conn, league)
 
@@ -149,7 +213,54 @@ def grade(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
 
     conn.commit()
     log(f"  graded {len(pending)} predictions ({hits} hits, {len(pending) - hits} misses)")
-    return {"graded": len(pending), "hits": hits, "misses": len(pending) - hits}
+
+    market_graded = _grade_markets(conn, league, graded_at, log)
+
+    return {
+        "graded": len(pending),
+        "hits": hits,
+        "misses": len(pending) - hits,
+        "markets_graded": market_graded,
+    }
+
+
+def _grade_markets(conn: sqlite3.Connection, league: str, graded_at: str, log) -> int:
+    total = 0
+    for market in MARKETS:
+        pending = store.ungraded_market_predictions(conn, league, market)
+        hits = 0
+        for row in pending:
+            actual_is_yes_or_over = (
+                (row["home_goals"] > 0 and row["away_goals"] > 0)
+                if market == "BTTS"
+                else (row["home_goals"] + row["away_goals"] > 2.5)
+            )
+            actual_outcome = {
+                "BTTS": "Yes" if actual_is_yes_or_over else "No",
+                "OU2.5": "Over" if actual_is_yes_or_over else "Under",
+            }[market]
+            p_yes_side = row["probabilities"][
+                "Yes" if market == "BTTS" else "Over"
+            ]
+            is_hit = row["pick"] == actual_outcome
+            hits += int(is_hit)
+
+            store.insert_market_result(
+                conn,
+                match_id=row["match_id"],
+                model_version=row["model_version"],
+                market=market,
+                actual_outcome=actual_outcome,
+                is_hit=is_hit,
+                log_loss=markets.binary_log_loss(p_yes_side, actual_is_yes_or_over),
+                brier=markets.binary_brier(p_yes_side, actual_is_yes_or_over),
+                graded_at=graded_at,
+            )
+        if pending:
+            log(f"  graded {len(pending)} {market} predictions ({hits} hits)")
+        total += len(pending)
+    conn.commit()
+    return total
 
 
 def accuracy(
@@ -179,3 +290,13 @@ def accuracy(
         "by_confidence": buckets,
         "model_version": model_version,
     }
+
+
+def market_accuracy(
+    conn: sqlite3.Connection,
+    league: str = "EPL",
+    model_version: str | None = config.MODEL_VERSION,
+) -> dict:
+    """Headline accuracy for each v2 market, scoped to one model version."""
+    return {market: store.market_accuracy(conn, league, market, model_version)
+            for market in MARKETS}
