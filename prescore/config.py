@@ -171,5 +171,23 @@ XG_WEIGHT = 0.5
 # shipping; this one has not been yet.
 CALIBRATION_TEMPERATURE = 0.9078
 
+# How long a match must have been "finished" (by kickoff_utc + this many
+# minutes) before it is trusted enough to grade.
+#
+# Real incident, 2026-09-06: TheSportsDB marked Arsenal vs Chelsea "finished"
+# with a score of 1-1 just 45 minutes after kickoff -- far too early for a
+# genuine final whistle. The match got graded on that score (a draw). The
+# real final score, corrected in a later sync, was 2-1 to Arsenal. Because
+# a graded result is immutable by design, that wrong grade cannot be
+# corrected the normal way; it is a permanent, documented data incident (see
+# the site's "Known data incidents" note).
+#
+# 150 minutes covers 90 minutes' play plus stoppage/extra time plus a safety
+# margin, so a "finished" flag this premature is never trusted again. There
+# is no column recording when a match's status actually changed to
+# "finished" -- kickoff_utc is the only timestamp available, so the buffer is
+# measured from there rather than from whenever the flag first appeared.
+MIN_GRADING_DELAY_MINUTES = 150
+
 # A model needs a reasonable history before its output means anything.
 MIN_TRAINING_MATCHES = 200

@@ -485,6 +485,25 @@ Team names differ between the two sources ("Manchester United" vs
 unrecognised name is **never** silently turned into a new team — it is
 reported, and the sync exits non-zero so a scheduled run surfaces it.
 
+**TheSportsDB can mark a match "finished" while it is still being played.**
+On 2026-09-06, Arsenal vs Chelsea was flagged `finished` with a score of 1-1
+just 45 minutes after kickoff — far too early for a real final whistle. The
+pipeline graded it on that information, correctly given what it was told: a
+draw. The real final score, 2-1 to Arsenal, arrived in a later sync, but a
+graded result is immutable by design, so that wrong grade cannot be corrected
+the normal way. It is a permanent, disclosed data incident — see the site's
+[Known data incidents](https://pre-scrore.netlify.app/method.html#incidents)
+section and the track record itself, where the affected prediction is
+labelled.
+
+Fixed structurally, not just for this one match: grading now requires
+`kickoff_utc` to be at least `MIN_GRADING_DELAY_MINUTES` (150 minutes — 90
+plus stoppage/extra time plus a safety margin) in the past before a
+"finished" flag is trusted (`prescore/config.py`, `prescore/store.py`'s
+`grading_cutoff()`). There is no column recording when a match's status
+actually changed to `finished`, so kickoff is the only timestamp available to
+measure the buffer from.
+
 ---
 
 ## Supabase

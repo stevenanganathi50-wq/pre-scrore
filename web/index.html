@@ -9,15 +9,11 @@
 <meta name="theme-color" content="#0d1015" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚽</text></svg>">
-
-<!-- Applied before paint so there is no flash of the wrong theme on load. -->
 <script>
 (function () {
   try {
     var saved = localStorage.getItem("prescore-theme");
-    if (saved === "light" || saved === "dark") {
-      document.documentElement.setAttribute("data-theme", saved);
-    }
+    if (saved === "light" || saved === "dark") document.documentElement.setAttribute("data-theme", saved);
   } catch (e) {}
 })();
 </script>
@@ -31,7 +27,7 @@
         <span class="brand-mark" aria-hidden="true">⚽</span>
         <div>
           <h1>pre-scrore</h1>
-          <p class="tagline" id="league-name">Premier League predictions</p>
+          <p class="tagline">Premier League predictions</p>
         </div>
       </div>
       <div class="header-actions">
@@ -40,17 +36,12 @@
         </button>
       </div>
     </div>
-    <nav class="site-nav" aria-label="Sections">
-      <a href="#record-panel">Track record</a>
-      <a href="#upcoming-panel">Upcoming</a>
-      <a href="#results-panel">Results</a>
-      <a href="#method-panel">Method</a>
-    </nav>
+    <nav class="site-nav" id="site-nav" aria-label="Pages"></nav>
   </div>
 </header>
 
 <div class="disclaimer-bar">
-  <p class="disclaimer wrap" id="disclaimer"></p>
+  <p class="disclaimer wrap">Statistical predictions for informational purposes. Not betting advice.</p>
 </div>
 
 <main class="wrap" id="main">
@@ -61,14 +52,24 @@
       A Poisson model predicts each match before it happens. The prediction is
       written to a database that will not let it be edited or deleted, so the
       record here is exactly what was said in advance — wins and losses both.
+      Every page on this site queries that database live.
     </p>
   </div>
 
   <section class="panel" id="record-panel" aria-labelledby="record-heading">
-    <div class="section-head">
-      <h2 id="record-heading">Track record</h2>
+    <div class="section-head"><h2 id="record-heading">Track record</h2></div>
+    <div class="callout warn">
+      <strong>One match on this record is graded wrong, and it will stay that way.</strong>
+      On 2026-09-06, TheSportsDB marked Arsenal vs Chelsea "finished" with a score
+      of 1-1 just 45 minutes after kickoff — long before a real final whistle. The
+      match was graded on that score. The real final score, 2-1 to Arsenal, arrived
+      in a later sync, but a graded result can never be edited or deleted, so the
+      wrong grade is permanent. Full writeup in
+      <a href="method.html#incidents">Known data incidents</a>; look for the
+      ⚠ badge on <a href="results.html">Results</a> and
+      <a href="markets.html">Markets</a>.
     </div>
-    <div id="record-body"><p class="muted">Loading…</p></div>
+    <div id="record-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
   </section>
 
   <section class="panel" id="upcoming-panel" aria-labelledby="upcoming-heading">
@@ -77,69 +78,18 @@
       <span class="section-count" id="upcoming-count"></span>
     </div>
     <p class="panel-note">
-      Written to the database before kickoff and immutable afterwards. Where a
-      fixture has predictions from more than one model version, the current
-      one leads — expand <strong>all versions</strong> to see how they compare.
+      Written to the database before kickoff and immutable afterwards. See
+      the <a href="results.html">Results</a> page for everything already
+      played, or <a href="markets.html">Markets</a> for BTTS and Over/Under.
     </p>
-    <div id="upcoming-body"><p class="muted">Loading…</p></div>
-  </section>
-
-  <section class="panel" id="results-panel" aria-labelledby="results-heading">
-    <div class="section-head">
-      <h2 id="results-heading">Results</h2>
-      <span class="section-count" id="results-count"></span>
-    </div>
-    <p class="panel-note">
-      Graded predictions, newest first. Misses are shown alongside hits — a
-      record that hides its losses is worth nothing.
-    </p>
-    <div id="results-body"><p class="muted">Loading…</p></div>
-  </section>
-
-  <section class="panel" id="method-panel" aria-labelledby="method-heading">
-    <div class="section-head">
-      <h2 id="method-heading">How this works</h2>
-    </div>
-    <div class="method">
-      <p>
-        Each team carries an <strong>attack</strong> and a <strong>defence</strong>
-        rating, fit from historical goals scored and conceded with home and away
-        split out. Those ratings produce an expected goal count for each side,
-        which becomes a probability for every scoreline, which adds up to the
-        home / draw / away numbers shown here.
-      </p>
-      <p>
-        Recent matches count for more than old ones — a result from two seasons
-        ago carries a fraction of the weight of one from last month. A
-        Dixon-Coles correction adjusts the low-scoring scorelines, which
-        independent Poisson models are known to get wrong.
-      </p>
-      <p>
-        <strong>The model rarely predicts a draw.</strong> Draws happen in about
-        a quarter of matches but are seldom the single most likely outcome, so
-        the pick is usually home or away. Read the probabilities, not just the
-        pick.
-      </p>
-      <p>
-        <strong>Predictions are never overwritten.</strong> When the model
-        changes, the new version is published alongside the old one rather than
-        replacing it, so every fixture can show how each version called it.
-        The headline accuracy figure only ever reflects one version at a
-        time — averaging different predictors together would misrepresent
-        both of them.
-      </p>
-      <p class="muted" id="model-meta"></p>
-    </div>
+    <div id="upcoming-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
   </section>
 
 </main>
 
 <footer class="site-footer">
   <div class="wrap">
-    <p>
-      Statistical analysis for informational purposes. Not betting advice, and
-      not a recommendation to wager.
-    </p>
+    <p>Statistical analysis for informational purposes. Not betting advice, and not a recommendation to wager.</p>
     <p class="muted" id="generated-at"></p>
     <p class="footer-links">
       <a href="https://github.com/stevenanganathi50-wq/pre-scrore" target="_blank" rel="noopener">Source</a>
@@ -147,8 +97,9 @@
   </div>
 </footer>
 
-<!-- Loads when opened directly from disk; ignored when absent. -->
-<script src="data.js" onerror="this.dataset.failed='1'"></script>
-<script src="app.js"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script src="ui.js"></script>
+<script src="page-index.js"></script>
 </body>
 </html>

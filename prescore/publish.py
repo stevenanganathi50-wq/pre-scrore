@@ -183,15 +183,23 @@ def publish(
     }
 
 
-def grade(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
+def grade(
+    conn: sqlite3.Connection, league: str = "EPL", log=print, as_of: str | None = None
+) -> dict:
     """Score every published prediction whose match has now finished.
 
     Grades 1X2 first, then each v2 market independently -- a fixture graded
     for 1X2 always gets its BTTS/OU2.5 results at the same time, since both
     only need the match to have finished, nothing else.
+
+    `as_of` overrides "now" when deciding whether a match's kickoff is far
+    enough in the past to trust its "finished" flag (see
+    config.MIN_GRADING_DELAY_MINUTES) -- production callers leave it unset
+    and get the real wall clock; tests use it to simulate elapsed time
+    without moving kickoff_utc itself.
     """
     graded_at = clock.now_iso()
-    pending = store.ungraded_predictions(conn, league)
+    pending = store.ungraded_predictions(conn, league, as_of=as_of)
 
     hits = 0
     for row in pending:
@@ -214,7 +222,7 @@ def grade(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
     conn.commit()
     log(f"  graded {len(pending)} predictions ({hits} hits, {len(pending) - hits} misses)")
 
-    market_graded = _grade_markets(conn, league, graded_at, log)
+    market_graded = _grade_markets(conn, league, graded_at, log, as_of=as_of)
 
     return {
         "graded": len(pending),
@@ -224,10 +232,12 @@ def grade(conn: sqlite3.Connection, league: str = "EPL", log=print) -> dict:
     }
 
 
-def _grade_markets(conn: sqlite3.Connection, league: str, graded_at: str, log) -> int:
+def _grade_markets(
+    conn: sqlite3.Connection, league: str, graded_at: str, log, as_of: str | None = None
+) -> int:
     total = 0
     for market in MARKETS:
-        pending = store.ungraded_market_predictions(conn, league, market)
+        pending = store.ungraded_market_predictions(conn, league, market, as_of=as_of)
         hits = 0
         for row in pending:
             actual_is_yes_or_over = (

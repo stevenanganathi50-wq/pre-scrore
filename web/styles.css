@@ -228,6 +228,11 @@ h1 {
 
 .site-nav a:hover { color: var(--text); }
 
+.site-nav a.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .disclaimer-bar {
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
@@ -356,6 +361,7 @@ h3 {
 .callout + .callout { margin-top: 0.75rem; }
 .callout strong { display: block; margin-bottom: 0.3rem; color: var(--text); }
 .callout.error { border-left-color: var(--miss); }
+.callout.warn { border-left-color: var(--draw); }
 
 /* --- fixtures --- */
 
@@ -614,6 +620,121 @@ tbody tr.is-current-row { background: var(--accent-soft); }
 .site-footer .footer-links { margin-top: 0.6rem; }
 .site-footer .footer-links a { color: var(--text-muted); margin-right: 1rem; }
 
+/* --- pagination --- */
+
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 1.25rem;
+  align-items: center;
+}
+
+.page-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.2rem;
+  height: 2.2rem;
+  padding: 0 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.84rem;
+  font-weight: 600;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.page-link:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+
+.page-link.current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.page-link.disabled {
+  color: var(--text-faint);
+  background: transparent;
+  cursor: default;
+}
+
+.page-ellipsis {
+  color: var(--text-faint);
+  padding: 0 0.2rem;
+  font-size: 0.84rem;
+}
+
+.pagination-summary {
+  width: 100%;
+  font-size: 0.8rem;
+  margin: 0.4rem 0 0;
+}
+
+/* --- loading / empty states --- */
+
+.loading-state, .empty-state {
+  padding: 1.5rem 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: prescore-spin 0.7s linear infinite;
+  margin-right: 0.5rem;
+  vertical-align: -0.15em;
+}
+
+@keyframes prescore-spin { to { transform: rotate(360deg); } }
+
+/* --- markets page: two market blocks stacked inside one fixture card --- */
+
+.market-block { margin-top: 0.7rem; }
+.market-block:first-of-type { margin-top: 0.85rem; }
+
+.market-block-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+/* --- market page tabs --- */
+
+.market-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.1rem;
+  flex-wrap: wrap;
+}
+
+.market-tab {
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.market-tab.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 @media (max-width: 640px) {
   .wrap { width: min(100%, 100% - 1.75rem); }
   .kickoff { margin-left: 0; width: 100%; order: 3; }
@@ -621,4 +742,5 @@ tbody tr.is-current-row { background: var(--accent-soft); }
   .stat-value { font-size: 1.5rem; }
   .panel { padding: 1.15rem; border-radius: var(--radius); }
   .hero { padding-top: 1.5rem; }
+  .pagination { justify-content: center; }
 }

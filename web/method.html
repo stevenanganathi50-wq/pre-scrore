@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pre-scrore — Method</title>
+<meta name="description" content="How the prediction model works, and what has and hasn't been validated.">
+<meta name="theme-color" content="#f3f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1015" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚽</text></svg>">
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem("prescore-theme");
+    if (saved === "light" || saved === "dark") document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">⚽</span>
+        <div>
+          <h1>pre-scrore</h1>
+          <p class="tagline">Premier League predictions</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">
+          <span id="theme-icon" aria-hidden="true">◐</span>
+        </button>
+      </div>
+    </div>
+    <nav class="site-nav" id="site-nav" aria-label="Pages"></nav>
+  </div>
+</header>
+
+<div class="disclaimer-bar">
+  <p class="disclaimer wrap">Statistical predictions for informational purposes. Not betting advice.</p>
+</div>
+
+<main class="wrap" id="main">
+
+  <div class="hero">
+    <h2>How this works</h2>
+    <p>The model, what has been tried, and what was rejected — including the numbers, not just the conclusions.</p>
+  </div>
+
+  <section class="panel" aria-labelledby="method-heading">
+    <div class="section-head"><h2 id="method-heading">The model</h2></div>
+    <div class="method">
+      <p>
+        Each team carries an <strong>attack</strong> and a <strong>defence</strong>
+        rating, fit from historical goals scored and conceded with home and away
+        split out. Those ratings produce an expected goal count for each side,
+        which becomes a probability for every scoreline, which adds up to the
+        home / draw / away numbers shown on this site.
+      </p>
+      <p>
+        Recent matches count for more than old ones — a result from two seasons
+        ago carries a fraction of the weight of one from last month. A
+        Dixon-Coles correction adjusts the low-scoring scorelines, which
+        independent Poisson models are known to get wrong.
+      </p>
+      <p>
+        <strong>BTTS and Over/Under 2.5</strong> (see <a href="markets.html">Markets</a>)
+        are derived from that same scoreline matrix — no separate model, no
+        new data, and no change to what the 1X2 prediction says for any fixture.
+      </p>
+      <p>
+        <strong>Predictions are never overwritten.</strong> When the model
+        changes, the new version is published alongside the old one rather than
+        replacing it, so every fixture can show how each version called it. The
+        headline accuracy figure only ever reflects one version at a time —
+        averaging different predictors together would misrepresent both.
+      </p>
+      <p>
+        <strong>The model rarely predicts a draw.</strong> Draws happen in about
+        a quarter of matches but are seldom the single most likely outcome, so
+        the pick is usually home or away. Read the probabilities, not just the pick.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="versions-heading">
+    <div class="section-head"><h2 id="versions-heading">Model versions</h2></div>
+    <div id="versions-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
+    <div class="method" style="margin-top: 1rem;">
+      <p class="muted" style="font-size: 0.85rem;">
+        <code>1.0</code> Poisson + Dixon-Coles, time decay, uniform ridge ·
+        <code>1.1</code> newcomer prior for teams with little or no history ·
+        <code>1.2</code> ratings fit to a goals/shots-on-target blend ·
+        <code>1.3</code> temperature scaling on the final H/D/A probabilities
+        (shipped ahead of the usual live-data validation bar, by explicit
+        decision — see the project README for the full writeup).
+      </p>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="backtest-heading">
+    <div class="section-head"><h2 id="backtest-heading">Backtest</h2></div>
+    <div class="method">
+      <p>
+        Before anything was published, the model was replayed against 8
+        seasons of history — 3,040 predictions, refitting before every match
+        date so no future data ever touched a fit. <strong>54.0% accuracy</strong>,
+        RPS 0.1999, against the market's 55.3% / 0.1953 — about a fifth of the
+        gap to closing odds closed since the first version.
+      </p>
+      <p class="muted" style="font-size: 0.85rem;">
+        A backtest is not a track record: it is what the model would have
+        done, not what it did in public. The numbers on
+        <a href="index.html">Overview</a> and <a href="results.html">Results</a>
+        are the ones that count. Full numbers, including two rejected
+        experiments (an ELO ensemble, an injury-count signal — both flipped
+        sign between validation windows and were not shipped) are in the
+        project's README.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel" id="incidents" aria-labelledby="incidents-heading">
+    <div class="section-head"><h2 id="incidents-heading">Known data incidents</h2></div>
+    <div class="method">
+      <p>
+        <strong>2026-09-06 — Arsenal 2-1 Chelsea graded as a draw.</strong>
+        TheSportsDB marked the match "finished" with a score of 1-1 just 45
+        minutes after kickoff — far too early for a genuine final whistle. The
+        pipeline graded it on that information, correctly given what it was
+        told: a draw, and an "Under 2.5" for the O/U market. The real final
+        score, 2-1 to Arsenal, arrived in a later sync and is what the match
+        record shows today.
+      </p>
+      <p>
+        <strong>The grade did not follow.</strong> Predictions are immutable
+        once graded — the whole point of the record is that a result can
+        never be quietly edited after the fact, including to fix a mistake
+        that was not the model's. So this one match stays wrong on the
+        record, permanently, and is marked with a ⚠ badge on
+        <a href="results.html">Results</a> and <a href="markets.html">Markets</a>
+        rather than hidden or corrected.
+      </p>
+      <p class="muted" style="font-size: 0.85rem;">
+        For what it's worth: both model versions actually picked this match
+        correctly (home win) and the Over 2.5 pick was also correct — both are
+        locked in as misses because the grade compares against the wrong
+        score. The BTTS "No" pick was a genuine miss either way, since both
+        readings of the score have both teams scoring.
+      </p>
+      <p>
+        <strong>Fixed structurally, not just patched for this one match.</strong>
+        Grading now requires a match's kickoff to be at least 150 minutes in
+        the past — 90 minutes' play plus stoppage/extra time plus a safety
+        margin — before a "finished" flag is trusted
+        (<code>MIN_GRADING_DELAY_MINUTES</code> in <code>prescore/config.py</code>).
+        A "finished" flag this premature will not be graded again.
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>Statistical analysis for informational purposes. Not betting advice, and not a recommendation to wager.</p>
+    <p class="footer-links">
+      <a href="https://github.com/stevenanganathi50-wq/pre-scrore" target="_blank" rel="noopener">Source</a>
+    </p>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script src="ui.js"></script>
+<script src="page-method.js"></script>
+</body>
+</html>

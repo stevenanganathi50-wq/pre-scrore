@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pre-scrore — Markets</title>
+<meta name="description" content="BTTS and Over/Under 2.5 predictions, derived from the same model as the 1X2 record.">
+<meta name="theme-color" content="#f3f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1015" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚽</text></svg>">
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem("prescore-theme");
+    if (saved === "light" || saved === "dark") document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">⚽</span>
+        <div>
+          <h1>pre-scrore</h1>
+          <p class="tagline">Premier League predictions</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">
+          <span id="theme-icon" aria-hidden="true">◐</span>
+        </button>
+      </div>
+    </div>
+    <nav class="site-nav" id="site-nav" aria-label="Pages"></nav>
+  </div>
+</header>
+
+<div class="disclaimer-bar">
+  <p class="disclaimer wrap">Statistical predictions for informational purposes. Not betting advice.</p>
+</div>
+
+<main class="wrap" id="main">
+
+  <div class="hero">
+    <h2>Markets: BTTS and Over/Under 2.5</h2>
+    <p>
+      Derived from the same scoreline matrix the model builds for 1X2 — no
+      separate model, no new data. See <a href="method.html">Method</a> for
+      how these are worked out.
+    </p>
+  </div>
+
+  <section class="panel" id="market-accuracy-panel" aria-labelledby="market-accuracy-heading">
+    <div class="section-head"><h2 id="market-accuracy-heading">Track record</h2></div>
+    <div id="market-accuracy-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
+  </section>
+
+  <section class="panel" id="market-upcoming-panel" aria-labelledby="market-upcoming-heading">
+    <div class="section-head">
+      <h2 id="market-upcoming-heading">Upcoming predictions</h2>
+      <span class="section-count" id="market-upcoming-count"></span>
+    </div>
+    <div id="market-upcoming-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
+  </section>
+
+  <section class="panel" id="market-results-panel" aria-labelledby="market-results-heading">
+    <div class="section-head">
+      <h2 id="market-results-heading">Graded predictions</h2>
+      <span class="section-count" id="market-results-count"></span>
+    </div>
+    <div id="market-results-body"><p class="loading-state"><span class="spinner"></span>Loading…</p></div>
+    <div id="market-results-pagination"></div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>Statistical analysis for informational purposes. Not betting advice, and not a recommendation to wager.</p>
+    <p class="footer-links">
+      <a href="https://github.com/stevenanganathi50-wq/pre-scrore" target="_blank" rel="noopener">Source</a>
+    </p>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script src="ui.js"></script>
+<script src="page-markets.js"></script>
+</body>
+</html>

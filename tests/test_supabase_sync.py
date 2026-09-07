@@ -12,7 +12,7 @@ from pathlib import Path
 from prescore import settings, store, supabase_sync
 
 from tests.test_pipeline import add_fixture, finish_match, seed_history
-from prescore import clock, publish
+from prescore import clock, config, publish
 from datetime import timedelta
 
 
@@ -78,10 +78,16 @@ class SyncTestCase(unittest.TestCase):
         store.init_schema(self.conn)
         seed_history(self.conn)
 
-        soon = clock.to_iso(clock.utc_now() + timedelta(days=2))
+        now = clock.utc_now()
+        soon = clock.to_iso(now + timedelta(days=2))
         self.match_id = add_fixture(self.conn, "Alpha", "Foxtrot", soon)
         add_fixture(self.conn, "Bravo", "Charlie", soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        # Well past soon's kickoff plus the grading delay, so grade() calls
+        # in these tests can simulate "now" without waiting for it.
+        self.graded_at = clock.to_iso(
+            now + timedelta(days=2, minutes=config.MIN_GRADING_DELAY_MINUTES + 10)
+        )
 
         self.client = FakeClient()
 
@@ -162,7 +168,7 @@ class TestPush(SyncTestCase):
 
     def test_results_are_pushed_after_grading(self):
         finish_match(self.conn, self.match_id, 3, 0)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         _, _, pred_ids = self.run_push()
         n = supabase_sync.push_results(
             self.conn, self.client, pred_ids, "EPL", log=lambda *a: None
@@ -218,7 +224,7 @@ class TestMarketSync(SyncTestCase):
 
     def test_results_round_trip_after_grading(self):
         finish_match(self.conn, self.match_id, 2, 1)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         self.run_push()
 
         rows = self.client.tables.get("market_prediction_results", [])

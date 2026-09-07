@@ -101,6 +101,11 @@ class PipelineTestCase(unittest.TestCase):
         self.soon = clock.to_iso(now + timedelta(days=2))
         self.later = clock.to_iso(now + timedelta(days=30))
         self.past = clock.to_iso(now - timedelta(days=2))
+        # Well past self.soon's kickoff plus the grading delay, so grade()
+        # calls in these tests can simulate "now" without waiting for it.
+        self.graded_at = clock.to_iso(
+            now + timedelta(days=2, minutes=config.MIN_GRADING_DELAY_MINUTES + 10)
+        )
 
     def tearDown(self):
         self.conn.close()
@@ -280,25 +285,57 @@ class TestGrade(PipelineTestCase):
 
     def test_grades_a_hit(self):
         self._publish_and_finish(3, 0)  # Alpha predicted to win, and did
-        summary = publish.grade(self.conn, log=lambda *a: None)
+        summary = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         self.assertEqual(summary["graded"], 1)
         self.assertEqual(summary["hits"], 1)
 
     def test_grades_a_miss(self):
         self._publish_and_finish(0, 3)  # Alpha predicted to win, and lost
-        summary = publish.grade(self.conn, log=lambda *a: None)
+        summary = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         self.assertEqual(summary["graded"], 1)
         self.assertEqual(summary["misses"], 1)
 
     def test_grading_is_idempotent(self):
         self._publish_and_finish(3, 0)
-        publish.grade(self.conn, log=lambda *a: None)
-        again = publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
+        again = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         self.assertEqual(again["graded"], 0)
 
     def test_unfinished_matches_are_not_graded(self):
         add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        summary = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
+        self.assertEqual(summary["graded"], 0)
+
+    def test_a_match_finished_just_after_kickoff_is_not_graded_yet(self):
+        """Guards the Arsenal-Chelsea incident: a "finished" flag minutes
+        after kickoff is not trusted until MIN_GRADING_DELAY_MINUTES has
+        passed, even if grade() is called."""
+        match_id = self._publish_and_finish(3, 0)
+        just_after_kickoff = clock.to_iso(
+            clock.parse_iso(self.soon) + timedelta(minutes=45)
+        )
+        summary = publish.grade(self.conn, log=lambda *a: None, as_of=just_after_kickoff)
+        self.assertEqual(summary["graded"], 0)
+        self.assertIsNone(
+            self.conn.execute(
+                """SELECT r.prediction_id FROM prediction_results r
+                   JOIN predictions p ON p.id = r.prediction_id
+                   WHERE p.match_id = ?""",
+                (match_id,),
+            ).fetchone()
+        )
+
+    def test_a_match_finished_well_after_kickoff_is_graded(self):
+        self._publish_and_finish(3, 0)
+        summary = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
+        self.assertEqual(summary["graded"], 1)
+
+    def test_grading_delay_defaults_to_the_real_clock(self):
+        """No as_of override: a match kicking off two days from now must not
+        be gradable under the real wall clock, no matter what its status
+        says."""
+        self._publish_and_finish(3, 0)
         summary = publish.grade(self.conn, log=lambda *a: None)
         self.assertEqual(summary["graded"], 0)
 
@@ -311,7 +348,7 @@ class TestGrade(PipelineTestCase):
         # Every match ends as an away win, so any home pick is a recorded loss.
         for match_id in match_ids:
             finish_match(self.conn, match_id, 0, 3)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         picks = {r["match_id"]: r["pick"] for r in store.track_record(self.conn, "EPL")}
         expected_hits = sum(1 for mid in match_ids if picks[mid] == "A")
@@ -418,7 +455,7 @@ class TestV2Markets(PipelineTestCase):
         match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 2, 1)  # both scored -> BTTS Yes
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         row = self.conn.execute(
             "SELECT actual_outcome, is_hit FROM market_prediction_results "
@@ -426,11 +463,24 @@ class TestV2Markets(PipelineTestCase):
         ).fetchone()
         self.assertEqual(row["actual_outcome"], "Yes")
 
+    def test_market_predictions_are_not_graded_just_after_kickoff(self):
+        match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
+        publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
+        finish_match(self.conn, match_id, 2, 1)
+        just_after_kickoff = clock.to_iso(
+            clock.parse_iso(self.soon) + timedelta(minutes=45)
+        )
+        publish.grade(self.conn, log=lambda *a: None, as_of=just_after_kickoff)
+        row = self.conn.execute(
+            "SELECT 1 FROM market_prediction_results WHERE match_id = ?", (match_id,),
+        ).fetchone()
+        self.assertIsNone(row)
+
     def test_grading_computes_btts_no_when_a_side_is_shut_out(self):
         match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 3, 0)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         row = self.conn.execute(
             "SELECT actual_outcome FROM market_prediction_results "
@@ -442,7 +492,7 @@ class TestV2Markets(PipelineTestCase):
         match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 2, 2)  # total 4 -> over 2.5
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         row = self.conn.execute(
             "SELECT actual_outcome FROM market_prediction_results "
@@ -454,8 +504,8 @@ class TestV2Markets(PipelineTestCase):
         match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 1, 1)
-        first = publish.grade(self.conn, log=lambda *a: None)
-        second = publish.grade(self.conn, log=lambda *a: None)
+        first = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
+        second = publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
         self.assertEqual(first["markets_graded"], 2)
         self.assertEqual(second["markets_graded"], 0)
 
@@ -463,7 +513,7 @@ class TestV2Markets(PipelineTestCase):
         match_id = add_fixture(self.conn, "Alpha", "Foxtrot", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 2, 1)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         summary = publish.market_accuracy(self.conn)
         self.assertIn("BTTS", summary)
@@ -478,7 +528,7 @@ class TestExport(PipelineTestCase):
         match_id = add_fixture(self.conn, "Charlie", "Delta", self.soon)
         publish.publish(self.conn, horizon_days=8, log=lambda *a: None)
         finish_match(self.conn, match_id, 2, 1)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
         payload = export.build(self.conn)
         self.assertEqual(len(payload["upcoming"]), 1)
@@ -529,7 +579,7 @@ class TestModelVersioning(PipelineTestCase):
             probs=(0.7, 0.2, 0.1), pick="H", confidence=0.7, created_at=now,
         )
         finish_match(self.conn, self.match_id, 3, 0)
-        publish.grade(self.conn, log=lambda *a: None)
+        publish.grade(self.conn, log=lambda *a: None, as_of=self.graded_at)
 
     def test_both_versions_are_stored(self):
         record = store.track_record(self.conn, "EPL")

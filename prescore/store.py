@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
-from . import config
+from . import clock, config
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
@@ -241,8 +241,28 @@ def insert_prediction(
     return int(cur.lastrowid)
 
 
-def ungraded_predictions(conn: sqlite3.Connection, league: str) -> list[dict]:
-    """Published predictions whose match has finished but which have no result."""
+def grading_cutoff(as_of: str | None = None) -> str:
+    """Latest kickoff_utc trusted enough to grade, given MIN_GRADING_DELAY_MINUTES.
+
+    `as_of` overrides "now" for tests simulating elapsed time; production
+    callers leave it unset and get the real wall clock.
+    """
+    now = clock.parse_iso(as_of) if as_of else clock.utc_now()
+    cutoff = now - timedelta(minutes=config.MIN_GRADING_DELAY_MINUTES)
+    return clock.to_iso(cutoff)
+
+
+def ungraded_predictions(
+    conn: sqlite3.Connection, league: str, as_of: str | None = None
+) -> list[dict]:
+    """Published predictions whose match finished long enough ago to trust,
+    and which have no result yet.
+
+    A "finished" flag can arrive prematurely with a wrong score (see
+    MIN_GRADING_DELAY_MINUTES) -- this only grades matches whose kickoff was
+    far enough in the past that a real final whistle is plausible.
+    """
+    cutoff = grading_cutoff(as_of)
     rows = conn.execute(
         """
         SELECT p.id, p.match_id, p.p_home, p.p_draw, p.p_away, p.pick,
@@ -251,10 +271,11 @@ def ungraded_predictions(conn: sqlite3.Connection, league: str) -> list[dict]:
         JOIN matches m ON m.id = p.match_id
         LEFT JOIN prediction_results r ON r.prediction_id = p.id
         WHERE m.league = ? AND m.status = 'finished' AND m.result IS NOT NULL
+          AND m.kickoff_utc <= ?
           AND r.prediction_id IS NULL
         ORDER BY m.kickoff_utc
         """,
-        (league,),
+        (league, cutoff),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -544,11 +565,17 @@ def insert_market_prediction(
 
 
 def ungraded_market_predictions(
-    conn: sqlite3.Connection, league: str, market: str
+    conn: sqlite3.Connection, league: str, market: str, as_of: str | None = None
 ) -> list[dict]:
-    """Published market predictions whose match has finished but has no result
-    yet. Grouped back up from one-row-per-outcome into one entry per fixture,
-    since grading needs the whole probability set plus the pick together."""
+    """Published market predictions whose match finished long enough ago to
+    trust, and which have no result yet. Grouped back up from
+    one-row-per-outcome into one entry per fixture, since grading needs the
+    whole probability set plus the pick together.
+
+    See ungraded_predictions() for why kickoff must be at least
+    MIN_GRADING_DELAY_MINUTES in the past before a "finished" match is graded.
+    """
+    cutoff = grading_cutoff(as_of)
     rows = conn.execute(
         """
         SELECT mp.match_id, mp.model_version, mp.outcome, mp.probability,
@@ -559,10 +586,11 @@ def ungraded_market_predictions(
           ON r.match_id = mp.match_id AND r.model_version = mp.model_version
          AND r.market = mp.market
         WHERE m.league = ? AND mp.market = ? AND m.status = 'finished'
-          AND m.home_goals IS NOT NULL AND r.match_id IS NULL
+          AND m.home_goals IS NOT NULL AND m.kickoff_utc <= ?
+          AND r.match_id IS NULL
         ORDER BY m.kickoff_utc
         """,
-        (league, market),
+        (league, market, cutoff),
     ).fetchall()
 
     grouped: dict[tuple, dict] = {}
